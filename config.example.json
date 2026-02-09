@@ -1,0 +1,25 @@
+{
+  "bridge": {
+    "port": 3000,
+    "host": "127.0.0.1",
+    "timeout": 30000,
+    "logLevel": "info"
+  },
+  "servers": [
+    {
+      "name": "filesystem",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"],
+      "enabled": true
+    },
+    {
+      "name": "github",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-github"],
+      "env": {
+        "GITHUB_PERSONAL_ACCESS_TOKEN": "your_token_here"
+      },
+      "enabled": false
+    }
+  ]
+}

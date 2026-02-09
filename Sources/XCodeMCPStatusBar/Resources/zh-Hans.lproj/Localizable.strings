@@ -1,0 +1,20 @@
+/* Status Bar Menu Items */
+"status.stopped" = "○ 已停止";
+"status.running" = "● 运行中";
+"status.starting" = "◐ 启动中...";
+"status.stopping" = "◑ 停止中...";
+"status.error" = "⚠ 错误: %@";
+
+/* Menu Actions */
+"menu.start" = "启动服务";
+"menu.stop" = "停止服务";
+"menu.restart" = "重启服务";
+"menu.configuration" = "配置信息";
+"menu.openConfig" = "打开配置文件...";
+"menu.quit" = "退出 XCode MCP Service";
+
+/* Configuration Submenu */
+"config.loadFailed" = "无法加载配置";
+"config.address" = "地址: %@:%d";
+"config.noServers" = "无已配置服务器";
+"config.servers.count" = "服务器 (%d):";

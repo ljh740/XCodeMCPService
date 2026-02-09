@@ -1,0 +1,11 @@
+.build/
+.swiftpm/
+*.xcodeproj/xcuserdata/
+DerivedData/
+.DS_Store
+.mcp.json
+.workflow/
+build/
+.codex/
+.playwright-mcp/
+config.json

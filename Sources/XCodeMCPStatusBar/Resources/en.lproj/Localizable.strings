@@ -1,0 +1,20 @@
+/* Status Bar Menu Items */
+"status.stopped" = "○ Stopped";
+"status.running" = "● Running";
+"status.starting" = "◐ Starting...";
+"status.stopping" = "◑ Stopping...";
+"status.error" = "⚠ Error: %@";
+
+/* Menu Actions */
+"menu.start" = "Start Service";
+"menu.stop" = "Stop Service";
+"menu.restart" = "Restart Service";
+"menu.configuration" = "Configuration";
+"menu.openConfig" = "Open Config File...";
+"menu.quit" = "Quit XCode MCP Service";
+
+/* Configuration Submenu */
+"config.loadFailed" = "Failed to load config";
+"config.address" = "Address: %@:%d";
+"config.noServers" = "No configured servers";
+"config.servers.count" = "Servers (%d):";
