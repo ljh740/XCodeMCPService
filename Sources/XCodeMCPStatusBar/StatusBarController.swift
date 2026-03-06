@@ -110,6 +110,15 @@ final class StatusBarController: NSObject {
         openConfig.target = self
         menu.addItem(openConfig)
 
+        // 打开日志目录
+        let openLogs = NSMenuItem(
+            title: L10n("menu.openLogs"),
+            action: #selector(openLogsFolder),
+            keyEquivalent: "l"
+        )
+        openLogs.target = self
+        menu.addItem(openLogs)
+
         menu.addItem(.separator())
 
         // 退出
@@ -255,6 +264,14 @@ final class StatusBarController: NSObject {
         let dirURL = URL(fileURLWithPath: configDir)
         // 确保目录存在
         try? FileManager.default.createDirectory(at: dirURL, withIntermediateDirectories: true)
+        NSWorkspace.shared.open(dirURL)
+    }
+
+    @objc private func openLogsFolder() {
+        let dirURL = URL(fileURLWithPath: logDirectory)
+        let fm = FileManager.default
+        // 确保目录存在
+        try? fm.createDirectory(at: dirURL, withIntermediateDirectories: true)
         NSWorkspace.shared.open(dirURL)
     }
 

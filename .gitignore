@@ -9,3 +9,10 @@ build/
 .codex/
 .playwright-mcp/
 config.json
+
+.claude
+.codex
+.ccw
+.qwen
+.gemini
+.ace-tool/

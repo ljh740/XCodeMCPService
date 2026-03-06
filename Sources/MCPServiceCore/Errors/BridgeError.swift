@@ -10,6 +10,7 @@ enum ErrorCodes {
     static let serverNotFound = -32002
     static let timeout = -32001
     static let bridgeError = -32000
+    static let healthCheckFailed = -32003
 }
 
 // MARK: - BridgeError
@@ -25,6 +26,7 @@ public enum BridgeError: Error, Sendable {
     case timeout(String, timeoutMs: Int)
     case configError(String)
     case routeError(String, resourceType: String, resourceName: String)
+    case healthCheckFailed(String, serverName: String)
 
     public var code: Int {
         switch self {
@@ -37,6 +39,7 @@ public enum BridgeError: Error, Sendable {
         case .timeout: ErrorCodes.timeout
         case .configError: ErrorCodes.bridgeError
         case .routeError: ErrorCodes.methodNotFound
+        case .healthCheckFailed: ErrorCodes.healthCheckFailed
         }
     }
 
@@ -54,6 +57,8 @@ public enum BridgeError: Error, Sendable {
             return msg
         case .routeError(let msg, _, _):
             return msg
+        case .healthCheckFailed(let msg, _):
+            return msg
         }
     }
 
@@ -64,6 +69,8 @@ public enum BridgeError: Error, Sendable {
             data = ["timeoutMs": String(timeoutMs)]
         case .routeError(_, let resourceType, let resourceName):
             data = ["resourceType": resourceType, "resourceName": resourceName]
+        case .healthCheckFailed(_, let serverName):
+            data = ["serverName": serverName]
         default:
             break
         }

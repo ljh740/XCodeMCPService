@@ -43,7 +43,7 @@ struct FileLogHandler: LogHandler {
 // MARK: - Log Directory
 
 /// 日志目录：~/Library/Application Support/XCodeMCPService/logs/
-private let logDirectory: String = {
+public let logDirectory: String = {
     let home = FileManager.default.homeDirectoryForCurrentUser.path
     return "\(home)/Library/Application Support/XCodeMCPService/logs"
 }()

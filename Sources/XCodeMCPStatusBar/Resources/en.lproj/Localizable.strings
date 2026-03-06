@@ -11,6 +11,7 @@
 "menu.restart" = "Restart Service";
 "menu.configuration" = "Configuration";
 "menu.openConfig" = "Open Config File...";
+"menu.openLogs" = "Open Logs Folder...";
 "menu.quit" = "Quit XCode MCP Service";
 
 /* Configuration Submenu */

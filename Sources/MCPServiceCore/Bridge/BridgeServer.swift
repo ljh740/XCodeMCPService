@@ -122,7 +122,49 @@ public actor BridgeServer {
         ])
 
         // 10. 创建 ProcessLifecycleManager 并监控
-        let lifecycleManager = ProcessLifecycleManager(clientManager: clientManager)
+        let policy = RestartPolicy()
+        let lifecycleLogger = logger
+        let callbacks = LifecycleCallbacks(
+            onRestarting: { name, attempt in
+                lifecycleLogger.info("Server restarting", metadata: [
+                    "server": name,
+                    "attempt": "\(attempt)",
+                ])
+            },
+            onRestarted: { [aggregator] name in
+                lifecycleLogger.info("Server restarted, refreshing capabilities", metadata: [
+                    "server": name,
+                ])
+                Task { await aggregator.refresh() }
+            },
+            onRestartFailed: { name, error in
+                lifecycleLogger.error("Server restart failed", metadata: [
+                    "server": name,
+                    "error": "\(error)",
+                ])
+            },
+            onMaxRestartsReached: { name in
+                lifecycleLogger.error("Max restarts reached, server permanently down", metadata: [
+                    "server": name,
+                ])
+            },
+            onHangDetected: { name in
+                lifecycleLogger.warning("Server hang detected", metadata: [
+                    "server": name,
+                ])
+            },
+            onHealthCheckFailed: { name, failures in
+                lifecycleLogger.warning("Health check failed", metadata: [
+                    "server": name,
+                    "consecutiveFailures": "\(failures)",
+                ])
+            }
+        )
+        let lifecycleManager = ProcessLifecycleManager(
+            clientManager: clientManager,
+            policy: policy,
+            callbacks: callbacks
+        )
         await lifecycleManager.monitorAll()
         self.lifecycleManager = lifecycleManager
 

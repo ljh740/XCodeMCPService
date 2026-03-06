@@ -11,6 +11,7 @@
 "menu.restart" = "重启服务";
 "menu.configuration" = "配置信息";
 "menu.openConfig" = "打开配置文件...";
+"menu.openLogs" = "打开日志目录...";
 "menu.quit" = "退出 XCode MCP Service";
 
 /* Configuration Submenu */
