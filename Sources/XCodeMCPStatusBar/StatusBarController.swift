@@ -174,6 +174,15 @@ final class StatusBarController: NSObject {
             statusMenuItem?.title = L10n("status.stopping")
             startStopMenuItem?.isEnabled = false
 
+        case .reconnecting(let name):
+            button.image = NSImage(
+                systemSymbolName: "arrow.triangle.2.circlepath",
+                accessibilityDescription: "MCP Bridge Service - Reconnecting"
+            )
+            statusMenuItem?.title = String(format: L10n("status.reconnecting"), name)
+            startStopMenuItem?.title = L10n("menu.stop")
+            startStopMenuItem?.isEnabled = true
+
         case .error(let msg):
             button.image = NSImage(
                 systemSymbolName: "exclamationmark.triangle",
@@ -229,7 +238,7 @@ final class StatusBarController: NSObject {
     @objc private func toggleService() {
         Task {
             let currentState = await bridgeManager.getState()
-            if currentState.isRunning {
+            if currentState.canStop {
                 await bridgeManager.stop()
             } else {
                 await bridgeManager.start()
@@ -278,7 +287,7 @@ final class StatusBarController: NSObject {
     @objc private func quitApp() {
         Task {
             let currentState = await bridgeManager.getState()
-            if currentState.isRunning {
+            if currentState.canStop {
                 await bridgeManager.stop()
             }
             NSApp.terminate(nil)

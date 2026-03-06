@@ -9,6 +9,7 @@ public enum ServiceState: Sendable, CustomStringConvertible {
     case starting
     case running
     case stopping
+    case reconnecting(String)
     case error(String)
 
     public var description: String {
@@ -17,6 +18,7 @@ public enum ServiceState: Sendable, CustomStringConvertible {
         case .starting: "starting"
         case .running: "running"
         case .stopping: "stopping"
+        case .reconnecting(let name): "reconnecting: \(name)"
         case .error(let msg): "error: \(msg)"
         }
     }
@@ -34,10 +36,12 @@ public enum ServiceState: Sendable, CustomStringConvertible {
         }
     }
 
-    /// 是否可以停止（仅 running 状态允许）
+    /// 是否可以停止（running 和 reconnecting 状态允许）
     public var canStop: Bool {
-        if case .running = self { return true }
-        return false
+        switch self {
+        case .running, .reconnecting: true
+        default: false
+        }
     }
 }
 
@@ -64,6 +68,12 @@ public actor BridgeManager {
     private var configPath: String?
     private(set) var state: ServiceState = .stopped
 
+    /// 当前正在重连的 server 集合，用于正确管理多 server 状态
+    private var reconnectingServers: Set<String> = []
+
+    /// 生命周期代数，每次 start() 递增，用于丢弃旧 bridge 的 stale events
+    private var lifecycleGeneration: Int = 0
+
     /// 状态变化回调，在状态更新后调用
     private var onStateChanged: (@Sendable (ServiceState) -> Void)?
 
@@ -85,9 +95,17 @@ public actor BridgeManager {
         guard state.canStart else { return }
 
         updateState(.starting)
+        reconnectingServers.removeAll()
+        lifecycleGeneration += 1
+        let currentGeneration = lifecycleGeneration
 
         let bridge = BridgeServer(configPath: configPath)
         self.bridge = bridge
+
+        await bridge.setLifecycleEventHandler { [weak self] event in
+            guard let self else { return }
+            Task { await self.handleLifecycleEvent(event, generation: currentGeneration) }
+        }
 
         do {
             try await bridge.start()
@@ -103,6 +121,7 @@ public actor BridgeManager {
         guard state.canStop else { return }
 
         updateState(.stopping)
+        reconnectingServers.removeAll()
 
         if let bridge {
             await bridge.stop()
@@ -148,6 +167,42 @@ public actor BridgeManager {
     }
 
     // MARK: - Private
+
+    private func handleLifecycleEvent(_ event: LifecycleEvent, generation: Int) {
+        // 丢弃旧 bridge 的 stale events（restart 场景）
+        guard generation == lifecycleGeneration else { return }
+
+        // 仅在 running/reconnecting 状态处理事件，
+        // 忽略 stopped/stopping/starting/error 中的 stale events
+        switch state {
+        case .running, .reconnecting:
+            break
+        default:
+            return
+        }
+
+        switch event {
+        case .serverRestarting(let name, _), .serverHangDetected(let name):
+            reconnectingServers.insert(name)
+            updateState(.reconnecting(name))
+        case .serverRestarted(let name):
+            reconnectingServers.remove(name)
+            if reconnectingServers.isEmpty {
+                updateState(.running)
+            } else {
+                updateState(.reconnecting(reconnectingServers.first!))
+            }
+        case .serverPermanentlyDown(let name):
+            reconnectingServers.remove(name)
+            if reconnectingServers.isEmpty {
+                updateState(.running)
+            } else {
+                updateState(.reconnecting(reconnectingServers.first!))
+            }
+        case .serverRestartFailed:
+            break  // 保持 reconnecting 直到成功或达到上限
+        }
+    }
 
     private func updateState(_ newState: ServiceState) {
         state = newState

@@ -3,6 +3,7 @@
 "status.running" = "● Running";
 "status.starting" = "◐ Starting...";
 "status.stopping" = "◑ Stopping...";
+"status.reconnecting" = "◐ Reconnecting: %@";
 "status.error" = "⚠ Error: %@";
 
 /* Menu Actions */

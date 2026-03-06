@@ -3,6 +3,7 @@
 "status.running" = "● 运行中";
 "status.starting" = "◐ 启动中...";
 "status.stopping" = "◑ 停止中...";
+"status.reconnecting" = "◐ 重连中: %@";
 "status.error" = "⚠ 错误: %@";
 
 /* Menu Actions */

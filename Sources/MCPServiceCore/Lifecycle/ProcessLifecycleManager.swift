@@ -109,6 +109,17 @@ public struct LifecycleCallbacks: Sendable {
     }
 }
 
+// MARK: - LifecycleEvent
+
+/// 生命周期事件，用于向上层（BridgeManager / StatusBar）传播状态变化
+public enum LifecycleEvent: Sendable {
+    case serverRestarting(name: String, attempt: Int)
+    case serverRestarted(name: String)
+    case serverRestartFailed(name: String, error: String)
+    case serverPermanentlyDown(name: String)
+    case serverHangDetected(name: String)
+}
+
 // MARK: - ProcessLifecycleManager
 
 /// 监控子进程健康状态，实现崩溃检测和自动重启（指数退避）

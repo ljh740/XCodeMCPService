@@ -27,6 +27,9 @@ public actor BridgeServer {
     private var running = false
     private let logger: BridgeLogger
 
+    /// 生命周期事件回调，供上层（BridgeManager）监听重连状态
+    private var onLifecycleEvent: (@Sendable (LifecycleEvent) -> Void)?
+
     // MARK: - Init
 
     public init(configPath: String? = nil) {
@@ -39,6 +42,11 @@ public actor BridgeServer {
 
     /// 服务器是否正在运行
     public var isRunning: Bool { running }
+
+    /// 设置生命周期事件回调
+    public func setLifecycleEventHandler(_ handler: (@Sendable (LifecycleEvent) -> Void)?) {
+        self.onLifecycleEvent = handler
+    }
 
     /// 启动桥接服务器
     ///
@@ -124,34 +132,40 @@ public actor BridgeServer {
         // 10. 创建 ProcessLifecycleManager 并监控
         let policy = RestartPolicy()
         let lifecycleLogger = logger
+        let eventHandler = self.onLifecycleEvent
         let callbacks = LifecycleCallbacks(
             onRestarting: { name, attempt in
                 lifecycleLogger.info("Server restarting", metadata: [
                     "server": name,
                     "attempt": "\(attempt)",
                 ])
+                eventHandler?(.serverRestarting(name: name, attempt: attempt))
             },
             onRestarted: { [aggregator] name in
                 lifecycleLogger.info("Server restarted, refreshing capabilities", metadata: [
                     "server": name,
                 ])
                 Task { await aggregator.refresh() }
+                eventHandler?(.serverRestarted(name: name))
             },
             onRestartFailed: { name, error in
                 lifecycleLogger.error("Server restart failed", metadata: [
                     "server": name,
                     "error": "\(error)",
                 ])
+                eventHandler?(.serverRestartFailed(name: name, error: "\(error)"))
             },
             onMaxRestartsReached: { name in
                 lifecycleLogger.error("Max restarts reached, server permanently down", metadata: [
                     "server": name,
                 ])
+                eventHandler?(.serverPermanentlyDown(name: name))
             },
             onHangDetected: { name in
                 lifecycleLogger.warning("Server hang detected", metadata: [
                     "server": name,
                 ])
+                eventHandler?(.serverHangDetected(name: name))
             },
             onHealthCheckFailed: { name, failures in
                 lifecycleLogger.warning("Health check failed", metadata: [
