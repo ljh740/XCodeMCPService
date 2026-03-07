@@ -15,6 +15,8 @@ public struct RestartPolicy: Codable, Sendable {
     public var hangTimeoutMs: Int
     /// 连续健康检查失败次数阈值，达到后触发重连
     public var hangThreshold: Int
+    /// 最大连续 hang→reconnect→hang 循环次数，超过后视为 permanently down
+    public var maxHangCycles: Int
 
     public init(
         maxRestarts: Int = 5,
@@ -23,7 +25,8 @@ public struct RestartPolicy: Codable, Sendable {
         resetAfterMs: Int = 60000,
         healthCheckIntervalMs: Int = 30000,
         hangTimeoutMs: Int = 10000,
-        hangThreshold: Int = 3
+        hangThreshold: Int = 3,
+        maxHangCycles: Int = 3
     ) {
         self.maxRestarts = max(maxRestarts, 0)
         self.backoffBaseMs = max(backoffBaseMs, 0)
@@ -32,11 +35,12 @@ public struct RestartPolicy: Codable, Sendable {
         self.healthCheckIntervalMs = max(healthCheckIntervalMs, 1)
         self.hangTimeoutMs = max(hangTimeoutMs, 1)
         self.hangThreshold = max(hangThreshold, 1)
+        self.maxHangCycles = max(maxHangCycles, 1)
     }
 
     private enum CodingKeys: String, CodingKey {
         case maxRestarts, backoffBaseMs, backoffMaxMs, resetAfterMs
-        case healthCheckIntervalMs, hangTimeoutMs, hangThreshold
+        case healthCheckIntervalMs, hangTimeoutMs, hangThreshold, maxHangCycles
     }
 
     public init(from decoder: Decoder) throws {
@@ -48,11 +52,12 @@ public struct RestartPolicy: Codable, Sendable {
         healthCheckIntervalMs = max(try container.decodeIfPresent(Int.self, forKey: .healthCheckIntervalMs) ?? 30000, 1)
         hangTimeoutMs = max(try container.decodeIfPresent(Int.self, forKey: .hangTimeoutMs) ?? 10000, 1)
         hangThreshold = max(try container.decodeIfPresent(Int.self, forKey: .hangThreshold) ?? 3, 1)
+        maxHangCycles = max(try container.decodeIfPresent(Int.self, forKey: .maxHangCycles) ?? 3, 1)
     }
 
     public static let `default` = RestartPolicy(
         maxRestarts: 5, backoffBaseMs: 1000, backoffMaxMs: 30000, resetAfterMs: 60000,
-        healthCheckIntervalMs: 30000, hangTimeoutMs: 10000, hangThreshold: 3
+        healthCheckIntervalMs: 30000, hangTimeoutMs: 10000, hangThreshold: 3, maxHangCycles: 3
     )
 }
 
@@ -69,6 +74,8 @@ public struct ProcessState: Sendable {
     public var lastHealthCheckAt: Date? = nil
     /// 连续健康检查失败次数
     public var consecutiveHealthFailures: Int = 0
+    /// 连续 hang→reconnect→hang 循环次数
+    public var hangCycleCount: Int = 0
 
     public init(serverName: String) {
         self.serverName = serverName
@@ -400,6 +407,16 @@ public actor ProcessLifecycleManager {
                 // Success: reset failure count, update timestamp
                 processStates[serverName]?.consecutiveHealthFailures = 0
                 processStates[serverName]?.lastHealthCheckAt = Date()
+
+                // Reset hang cycle count on successful ping (server is stable)
+                if processStates[serverName]?.hangCycleCount ?? 0 > 0 {
+                    let previousCycles = processStates[serverName]?.hangCycleCount ?? 0
+                    logger.info("Server stabilized, resetting hang cycle count", metadata: [
+                        "server": serverName,
+                        "previousHangCycles": "\(previousCycles)",
+                    ])
+                    processStates[serverName]?.hangCycleCount = 0
+                }
             } catch {
                 // Revalidate after await
                 guard !disposed, monitoredServers.contains(serverName) else { return }
@@ -444,6 +461,25 @@ public actor ProcessLifecycleManager {
         // Reentrancy guard
         guard processStates[serverName]?.isRestarting != true else {
             logger.debug("Already restarting, skipping hang reconnection", metadata: ["server": serverName])
+            return
+        }
+
+        // Check hang cycle limit before attempting reconnect
+        processStates[serverName]?.hangCycleCount += 1
+        let hangCycleCount = processStates[serverName]?.hangCycleCount ?? 1
+        if hangCycleCount > policy.maxHangCycles {
+            logger.error("Max hang cycles reached, server permanently down", metadata: [
+                "server": serverName,
+                "hangCycles": "\(hangCycleCount)",
+                "maxHangCycles": "\(policy.maxHangCycles)",
+            ])
+            // Remove from monitored set first to prevent handleCrash from
+            // re-entering when stopServer terminates the process.
+            monitoredServers.remove(serverName)
+            healthCheckTasks[serverName]?.cancel()
+            healthCheckTasks.removeValue(forKey: serverName)
+            await clientManager.stopServer(name: serverName)
+            callbacks.onMaxRestartsReached?(serverName)
             return
         }
 
@@ -545,6 +581,7 @@ public actor ProcessLifecycleManager {
                 logger.info("Hang reconnection succeeded", metadata: [
                     "server": serverName,
                     "attempt": "\(attempt)",
+                    "hangCycle": "\(processStates[serverName]?.hangCycleCount ?? 0)",
                 ])
                 callbacks.onRestarted?(serverName)
 

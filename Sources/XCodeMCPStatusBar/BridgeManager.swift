@@ -10,6 +10,7 @@ public enum ServiceState: Sendable, CustomStringConvertible {
     case running
     case stopping
     case reconnecting(String)
+    case degraded(String)
     case error(String)
 
     public var description: String {
@@ -19,6 +20,7 @@ public enum ServiceState: Sendable, CustomStringConvertible {
         case .running: "running"
         case .stopping: "stopping"
         case .reconnecting(let name): "reconnecting: \(name)"
+        case .degraded(let name): "degraded: \(name) permanently down"
         case .error(let msg): "error: \(msg)"
         }
     }
@@ -36,10 +38,10 @@ public enum ServiceState: Sendable, CustomStringConvertible {
         }
     }
 
-    /// 是否可以停止（running 和 reconnecting 状态允许）
+    /// 是否可以停止（running、reconnecting、degraded 状态允许）
     public var canStop: Bool {
         switch self {
-        case .running, .reconnecting: true
+        case .running, .reconnecting, .degraded: true
         default: false
         }
     }
@@ -68,8 +70,13 @@ public actor BridgeManager {
     private var configPath: String?
     private(set) var state: ServiceState = .stopped
 
+    private let logger = BridgeLogger(label: "mcp-forward.bridge-manager")
+
     /// 当前正在重连的 server 集合，用于正确管理多 server 状态
     private var reconnectingServers: Set<String> = []
+
+    /// 已永久下线的 server 集合，用于维持 degraded 状态
+    private var permanentlyDownServers: Set<String> = []
 
     /// 生命周期代数，每次 start() 递增，用于丢弃旧 bridge 的 stale events
     private var lifecycleGeneration: Int = 0
@@ -96,6 +103,7 @@ public actor BridgeManager {
 
         updateState(.starting)
         reconnectingServers.removeAll()
+        permanentlyDownServers.removeAll()
         lifecycleGeneration += 1
         let currentGeneration = lifecycleGeneration
 
@@ -122,6 +130,7 @@ public actor BridgeManager {
 
         updateState(.stopping)
         reconnectingServers.removeAll()
+        permanentlyDownServers.removeAll()
 
         if let bridge {
             await bridge.stop()
@@ -170,16 +179,32 @@ public actor BridgeManager {
 
     private func handleLifecycleEvent(_ event: LifecycleEvent, generation: Int) {
         // 丢弃旧 bridge 的 stale events（restart 场景）
-        guard generation == lifecycleGeneration else { return }
-
-        // 仅在 running/reconnecting 状态处理事件，
-        // 忽略 stopped/stopping/starting/error 中的 stale events
-        switch state {
-        case .running, .reconnecting:
-            break
-        default:
+        guard generation == lifecycleGeneration else {
+            logger.debug("Ignoring stale lifecycle event", metadata: [
+                "event": "\(event)",
+                "eventGeneration": "\(generation)",
+                "currentGeneration": "\(lifecycleGeneration)",
+            ])
             return
         }
+
+        // 仅在 running/reconnecting/degraded 状态处理事件，
+        // 忽略 stopped/stopping/starting/error 中的 stale events
+        switch state {
+        case .running, .reconnecting, .degraded:
+            break
+        default:
+            logger.debug("Ignoring lifecycle event in non-active state", metadata: [
+                "event": "\(event)",
+                "state": "\(state)",
+            ])
+            return
+        }
+
+        logger.info("Handling lifecycle event", metadata: [
+            "event": "\(event)",
+            "currentState": "\(state)",
+        ])
 
         switch event {
         case .serverRestarting(let name, _), .serverHangDetected(let name):
@@ -188,14 +213,19 @@ public actor BridgeManager {
         case .serverRestarted(let name):
             reconnectingServers.remove(name)
             if reconnectingServers.isEmpty {
-                updateState(.running)
+                if permanentlyDownServers.isEmpty {
+                    updateState(.running)
+                } else {
+                    updateState(.degraded(permanentlyDownServers.first!))
+                }
             } else {
                 updateState(.reconnecting(reconnectingServers.first!))
             }
         case .serverPermanentlyDown(let name):
             reconnectingServers.remove(name)
+            permanentlyDownServers.insert(name)
             if reconnectingServers.isEmpty {
-                updateState(.running)
+                updateState(.degraded(name))
             } else {
                 updateState(.reconnecting(reconnectingServers.first!))
             }

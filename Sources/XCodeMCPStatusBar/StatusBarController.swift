@@ -191,6 +191,15 @@ final class StatusBarController: NSObject {
             statusMenuItem?.title = String(format: L10n("status.error"), msg)
             startStopMenuItem?.title = L10n("menu.start")
             startStopMenuItem?.isEnabled = true
+
+        case .degraded(let name):
+            button.image = NSImage(
+                systemSymbolName: "exclamationmark.triangle",
+                accessibilityDescription: "MCP Bridge Service - Degraded"
+            )
+            statusMenuItem?.title = String(format: L10n("status.degraded"), name)
+            startStopMenuItem?.title = L10n("menu.stop")
+            startStopMenuItem?.isEnabled = true
         }
 
         // 刷新配置信息子菜单

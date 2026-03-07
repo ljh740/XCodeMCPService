@@ -3,6 +3,15 @@ import Logging
 
 // MARK: - FileLogHandler
 
+/// 日志时间戳格式（值类型，线程安全）
+private let logDateFormatStyle = Date.ISO8601FormatStyle(
+    dateSeparator: .dash,
+    dateTimeSeparator: .standard,
+    timeSeparator: .colon,
+    timeZoneSeparator: .omitted,
+    includingFractionalSeconds: true
+)
+
 /// 将日志写入文件的 LogHandler
 struct FileLogHandler: LogHandler {
     var metadata: Logger.Metadata = [:]
@@ -30,7 +39,7 @@ struct FileLogHandler: LogHandler {
         function: String,
         line: UInt
     ) {
-        let timestamp = ISO8601DateFormatter().string(from: Date())
+        let timestamp = Date.now.formatted(logDateFormatStyle)
         let merged = self.metadata.merging(metadata ?? [:]) { _, new in new }
         let metaStr = merged.isEmpty ? "" : " \(merged.map { "\($0)=\($1)" }.joined(separator: " "))"
         let text = "\(timestamp) [\(level)] [\(label)] \(message)\(metaStr)\n"

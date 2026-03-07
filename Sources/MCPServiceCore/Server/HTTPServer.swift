@@ -272,6 +272,8 @@ public actor HTTPServer {
             }
         }()
 
+        let requestStart = ContinuousClock.now
+
         do {
             let data = try await TCPConnectionHelper.receiveAllData(on: connection)
             let parsed = try HTTPParser.parseHTTPRequest(data)
@@ -284,6 +286,16 @@ public actor HTTPServer {
                 clientIP: clientIP
             )
             let response = await routeRequest(request)
+
+            let elapsed = ContinuousClock.now - requestStart
+            logger.info("Request completed", metadata: [
+                "method": request.method,
+                "path": request.path,
+                "status": "\(response.statusCode)",
+                "elapsedMs": "\(elapsed.components.seconds * 1000 + elapsed.components.attoseconds / 1_000_000_000_000_000)",
+                "clientIP": clientIP ?? "unknown",
+            ])
+
             let rawResponse = HTTPParser.serializeHTTPResponse(response)
             try await TCPConnectionHelper.sendData(rawResponse, on: connection)
         } catch {

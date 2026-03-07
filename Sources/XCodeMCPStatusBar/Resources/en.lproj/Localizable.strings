@@ -4,6 +4,7 @@
 "status.starting" = "◐ Starting...";
 "status.stopping" = "◑ Stopping...";
 "status.reconnecting" = "◐ Reconnecting: %@";
+"status.degraded" = "⚠ Degraded: %@ down";
 "status.error" = "⚠ Error: %@";
 
 /* Menu Actions */

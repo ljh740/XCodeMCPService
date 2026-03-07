@@ -4,6 +4,7 @@
 "status.starting" = "◐ 启动中...";
 "status.stopping" = "◑ 停止中...";
 "status.reconnecting" = "◐ 重连中: %@";
+"status.degraded" = "⚠ 降级: %@ 已下线";
 "status.error" = "⚠ 错误: %@";
 
 /* Menu Actions */
