@@ -114,6 +114,7 @@ public actor StdioClientManager: StdioClientManaging {
                 "timeoutMs": "\(Self.connectTimeoutMs)",
                 "elapsed": "\(elapsed)",
             ])
+            await client.disconnect()
             kill(process.processIdentifier, SIGKILL)
             try? stdinPipe.fileHandleForWriting.close()
             try? stdoutPipe.fileHandleForReading.close()
@@ -122,6 +123,7 @@ public actor StdioClientManager: StdioClientManaging {
         } catch {
             // Connection failed — process is useless; use SIGKILL for immediate cleanup
             // (SIGTERM may be ignored by a stuck child, causing process leaks)
+            await client.disconnect()
             kill(process.processIdentifier, SIGKILL)
             try? stdinPipe.fileHandleForWriting.close()
             try? stdoutPipe.fileHandleForReading.close()

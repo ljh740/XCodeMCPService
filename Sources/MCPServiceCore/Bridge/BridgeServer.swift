@@ -155,10 +155,11 @@ public actor BridgeServer {
                 ])
                 eventHandler?(.serverRestartFailed(name: name, error: "\(error)"))
             },
-            onMaxRestartsReached: { name in
+            onMaxRestartsReached: { [aggregator] name in
                 lifecycleLogger.error("Max restarts reached, server permanently down", metadata: [
                     "server": name,
                 ])
+                Task { await aggregator.refresh() }
                 eventHandler?(.serverPermanentlyDown(name: name))
             },
             onHangDetected: { name in

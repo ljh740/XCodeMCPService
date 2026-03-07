@@ -81,6 +81,10 @@ public actor BridgeManager {
     /// 生命周期代数，每次 start() 递增，用于丢弃旧 bridge 的 stale events
     private var lifecycleGeneration: Int = 0
 
+    /// 事件通道，保证 lifecycle events 按 FIFO 顺序处理
+    private var eventContinuation: AsyncStream<LifecycleEvent>.Continuation?
+    private var eventConsumerTask: Task<Void, Never>?
+
     /// 状态变化回调，在状态更新后调用
     private var onStateChanged: (@Sendable (ServiceState) -> Void)?
 
@@ -110,15 +114,30 @@ public actor BridgeManager {
         let bridge = BridgeServer(configPath: configPath)
         self.bridge = bridge
 
-        await bridge.setLifecycleEventHandler { [weak self] event in
-            guard let self else { return }
-            Task { await self.handleLifecycleEvent(event, generation: currentGeneration) }
+        // Set up ordered event processing via AsyncStream
+        eventConsumerTask?.cancel()
+        let (stream, continuation) = AsyncStream.makeStream(of: LifecycleEvent.self)
+        self.eventContinuation = continuation
+
+        eventConsumerTask = Task { [weak self] in
+            for await event in stream {
+                guard let self else { break }
+                await self.handleLifecycleEvent(event, generation: currentGeneration)
+            }
+        }
+
+        await bridge.setLifecycleEventHandler { event in
+            continuation.yield(event)
         }
 
         do {
             try await bridge.start()
             updateState(.running)
         } catch {
+            eventContinuation?.finish()
+            eventContinuation = nil
+            eventConsumerTask?.cancel()
+            eventConsumerTask = nil
             self.bridge = nil
             updateState(.error(error.localizedDescription))
         }
@@ -131,6 +150,12 @@ public actor BridgeManager {
         updateState(.stopping)
         reconnectingServers.removeAll()
         permanentlyDownServers.removeAll()
+
+        // Stop event processing
+        eventContinuation?.finish()
+        eventContinuation = nil
+        eventConsumerTask?.cancel()
+        eventConsumerTask = nil
 
         if let bridge {
             await bridge.stop()

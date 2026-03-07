@@ -529,13 +529,14 @@ struct HealthShutdownTests {
         )
         await manager.monitor(serverName: "reset-srv")
 
-        // Trigger a crash to increment restart count (resets to 0 on success)
+        // Trigger a crash to increment restart count (no longer reset on success;
+        // resetAfterMs handles time-based reset instead)
         await manager.handleCrash(serverName: "reset-srv")
 
         let stateAfterCrash = await manager.getProcessState(serverName: "reset-srv")
         #expect(stateAfterCrash != nil)
-        // restartCount is reset to 0 after successful restart
-        #expect(stateAfterCrash!.restartCount == 0)
+        // restartCount remains 1 after successful restart (budget preserved)
+        #expect(stateAfterCrash!.restartCount == 1)
 
         // Reset
         await manager.resetRestartCount(serverName: "reset-srv")

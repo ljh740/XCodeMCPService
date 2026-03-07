@@ -20,10 +20,23 @@ final class TimeoutState<T: Sendable>: @unchecked Sendable {
         var continuation: CheckedContinuation<T, any Error>?
         var operationTask: Task<Void, Never>?
         var timeoutTask: Task<Void, Never>?
+        /// Stores cancellation error when fireTimeout is called before setContinuation.
+        var pendingCancellationError: (any Error)?
     }
 
     func setContinuation(_ cont: CheckedContinuation<T, any Error>) {
-        mutex.withLock { $0.continuation = cont }
+        let earlyError: (any Error)? = mutex.withLock { s in
+            if let error = s.pendingCancellationError {
+                s.pendingCancellationError = nil
+                return error
+            }
+            s.continuation = cont
+            return nil
+        }
+        // Resume immediately if cancellation arrived before continuation was set.
+        if let earlyError {
+            cont.resume(throwing: earlyError)
+        }
     }
 
     func setOperationTask(_ task: Task<Void, Never>) {
@@ -71,9 +84,14 @@ final class TimeoutState<T: Sendable>: @unchecked Sendable {
     }
 
     /// Attempt to fire timeout: resume with error, cancel both tasks, clear refs.
+    /// If continuation hasn't been set yet, stores the error for setContinuation to pick up.
     func fireTimeout(_ error: any Error) {
         mutex.withLock { s in
-            guard let cont = s.continuation else { return }
+            guard let cont = s.continuation else {
+                // Continuation not yet set — store for setContinuation to pick up.
+                s.pendingCancellationError = error
+                return
+            }
             s.continuation = nil
             s.operationTask?.cancel()
             s.timeoutTask?.cancel()
@@ -94,6 +112,9 @@ func asyncWithTimeout<T: Sendable>(
     _ timeoutMs: Int,
     operation: @escaping @Sendable () async throws -> T
 ) async throws -> T {
+    // Fail fast if already cancelled before starting the race.
+    try Task.checkCancellation()
+
     let state = TimeoutState<T>()
 
     return try await withTaskCancellationHandler {
@@ -111,7 +132,12 @@ func asyncWithTimeout<T: Sendable>(
             state.setOperationTask(opTask)
 
             let timeoutTask = Task {
-                try? await Task.sleep(for: .milliseconds(timeoutMs))
+                do {
+                    try await Task.sleep(for: .milliseconds(timeoutMs))
+                } catch {
+                    // Sleep was cancelled (parent task cancellation) — don't fire timeout.
+                    return
+                }
                 state.fireTimeout(AsyncTimeoutError(timeoutMs: timeoutMs))
             }
             state.setTimeoutTask(timeoutTask)

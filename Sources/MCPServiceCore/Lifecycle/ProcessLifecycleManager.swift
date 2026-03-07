@@ -310,8 +310,6 @@ public actor ProcessLifecycleManager {
 
                 processStates[serverName]?.lastRestartAt = Date()
                 processStates[serverName]?.consecutiveHealthFailures = 0
-                processStates[serverName]?.restartCount = 0
-                processStates[serverName]?.firstFailureAt = nil
 
                 logger.info("Restart succeeded", metadata: [
                     "server": serverName,
@@ -417,18 +415,16 @@ public actor ProcessLifecycleManager {
                     ])
                     processStates[serverName]?.hangCycleCount = 0
                 }
-            } catch {
-                // Revalidate after await
+            } catch is AsyncTimeoutError {
+                // Timeout: server is unresponsive (hung)
                 guard !disposed, monitoredServers.contains(serverName) else { return }
 
-                // Failure: increment consecutive failures
                 processStates[serverName]?.consecutiveHealthFailures += 1
                 let failures = processStates[serverName]?.consecutiveHealthFailures ?? 0
 
-                logger.warning("Health check failed", metadata: [
+                logger.warning("Health check timed out", metadata: [
                     "server": serverName,
                     "consecutiveFailures": "\(failures)",
-                    "error": "\(error)",
                 ])
                 callbacks.onHealthCheckFailed?(serverName, failures)
 
@@ -442,6 +438,43 @@ public actor ProcessLifecycleManager {
                     callbacks.onHangDetected?(serverName)
                     await reconnectHungServer(serverName: serverName)
                     // After reconnect attempt, the loop continues (new health task may have been started)
+                    return
+                }
+            } catch {
+                // Non-timeout error (e.g. transport failure, broken pipe).
+                guard !disposed, monitoredServers.contains(serverName) else { return }
+
+                // Ping is optional in MCP; servers that don't implement it return
+                // methodNotFound. Treat this as a successful health check — the
+                // server is alive and responding, just doesn't support ping.
+                if case MCPError.methodNotFound = error {
+                    processStates[serverName]?.consecutiveHealthFailures = 0
+                    processStates[serverName]?.hangCycleCount = 0
+                    processStates[serverName]?.lastHealthCheckAt = Date()
+                    continue
+                }
+
+                // Increment failure counter as a safety net: if handleCrash doesn't
+                // fire (zombie process, broken pipe without exit), health check
+                // eventually triggers reconnection after reaching hangThreshold.
+                processStates[serverName]?.consecutiveHealthFailures += 1
+                let failures = processStates[serverName]?.consecutiveHealthFailures ?? 0
+                processStates[serverName]?.lastHealthCheckAt = Date()
+                logger.debug("Health check error (non-timeout)", metadata: [
+                    "server": serverName,
+                    "consecutiveFailures": "\(failures)",
+                    "error": "\(error)",
+                ])
+                callbacks.onHealthCheckFailed?(serverName, failures)
+
+                if failures >= policy.hangThreshold {
+                    logger.error("Sustained health check failures, triggering reconnection", metadata: [
+                        "server": serverName,
+                        "consecutiveFailures": "\(failures)",
+                        "threshold": "\(policy.hangThreshold)",
+                    ])
+                    callbacks.onHangDetected?(serverName)
+                    await reconnectHungServer(serverName: serverName)
                     return
                 }
             }
@@ -575,8 +608,6 @@ public actor ProcessLifecycleManager {
 
                 processStates[serverName]?.lastRestartAt = Date()
                 processStates[serverName]?.consecutiveHealthFailures = 0
-                processStates[serverName]?.restartCount = 0
-                processStates[serverName]?.firstFailureAt = nil
 
                 logger.info("Hang reconnection succeeded", metadata: [
                     "server": serverName,
