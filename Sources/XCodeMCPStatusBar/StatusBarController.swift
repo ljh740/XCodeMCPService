@@ -1,9 +1,9 @@
 import AppKit
 import MCPServiceCore
 
-/// 本地化字符串 helper，从 Bundle.module 加载
+/// 本地化字符串 helper，优先从 app 的 Resources bundle 加载
 private func L10n(_ key: String) -> String {
-    NSLocalizedString(key, bundle: Bundle.module, comment: "")
+    StatusBarLocalization.string(key)
 }
 
 // MARK: - StatusBarController
