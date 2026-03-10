@@ -45,7 +45,16 @@ cp -r "build/XCode MCP Service.app" /Applications/
 | 状态栏应用 | `Contents/MacOS/XCodeMCPStatusBar` | 主入口，状态栏可视化管理 |
 | CLI 服务 | `Contents/MacOS/XCodeMCPService` | 命令行服务（适合后台运行） |
 
-> 也可以直接 `swift build -c release` 获取独立二进制，位于 `.build/release/`。
+打包脚本还会额外产出：
+
+| 产物 | 路径 | 说明 |
+|------|------|------|
+| DMG 镜像 | `build/XCodeMCPService.dmg` | 推荐的 macOS 分发包 |
+| SHA-256 | `build/XCodeMCPService.dmg.sha256` | DMG 校验值 |
+| Zip 压缩包 | `build/XCodeMCPService.app.zip` | 未签名的分发包 |
+| SHA-256 | `build/XCodeMCPService.app.zip.sha256` | 压缩包校验值 |
+
+> 独立二进制的真实目录请通过 `swift build -c release --show-bin-path` 查询。
 
 ## 快速开始
 
@@ -85,13 +94,14 @@ mkdir -p ~/Library/Application\ Support/XCodeMCPService
 open "/Applications/XCode MCP Service.app"
 
 # 或通过 CLI 启动
-.build/release/XCodeMCPService
+BIN_DIR="$(swift build -c release --show-bin-path)"
+"$BIN_DIR/XCodeMCPService"
 
 # 指定配置文件
-.build/release/XCodeMCPService --config /path/to/config.json
+"$BIN_DIR/XCodeMCPService" --config /path/to/config.json
 
 # 通过环境变量
-CONFIG_PATH=/path/to/config.json .build/release/XCodeMCPService
+CONFIG_PATH=/path/to/config.json "$BIN_DIR/XCodeMCPService"
 ```
 
 ### 3. 配置 MCP 客户端
@@ -148,6 +158,12 @@ swift test
 ```
 
 83 个测试覆盖：HTTP 解析/序列化/路由、会话管理、ResponseQueue、ID 映射、进程生命周期管理等。
+
+## CI/CD
+
+- `.github/workflows/ci.yml`：在每次 push 和 pull request 时执行 `swift build -c release` 与 `swift test --parallel`。
+- `.github/workflows/release.yml`：在推送 `v*` tag 或手动触发时执行 `bash build-app.sh`，并上传 `.app`、`dmg`、`zip` 及对应的 SHA-256 校验文件作为 workflow artifact。
+- tag 构建会把 `build/XCodeMCPService-<tag>.dmg`、`build/XCodeMCPService-<tag>.dmg.sha256`、`build/XCodeMCPService-<tag>.zip`、`build/XCodeMCPService-<tag>.zip.sha256` 自动发布到同名 GitHub Release。
 
 ## 许可证
 

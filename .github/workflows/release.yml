@@ -1,0 +1,85 @@
+name: Release
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  package-app:
+    runs-on: macos-15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Show toolchain
+        run: |
+          sw_vers
+          xcodebuild -version
+          swift --version
+          gh --version
+
+      - name: Build app bundle
+        run: bash build-app.sh
+
+      - name: Stamp release assets
+        id: asset_names
+        run: |
+          RAW_NAME="${GITHUB_REF_NAME:-manual-${GITHUB_RUN_NUMBER}}"
+          SAFE_NAME="${RAW_NAME//\//-}"
+          DMG_SOURCE="build/XCodeMCPService.dmg"
+          DMG_SHA_SOURCE="${DMG_SOURCE}.sha256"
+          ZIP_SOURCE="build/XCodeMCPService.app.zip"
+          ZIP_SHA_SOURCE="${ZIP_SOURCE}.sha256"
+          DMG_TARGET="build/XCodeMCPService-${SAFE_NAME}.dmg"
+          DMG_SHA_TARGET="${DMG_TARGET}.sha256"
+          ZIP_TARGET="build/XCodeMCPService-${SAFE_NAME}.zip"
+          ZIP_SHA_TARGET="${ZIP_TARGET}.sha256"
+          mv "$DMG_SOURCE" "$DMG_TARGET"
+          mv "$DMG_SHA_SOURCE" "$DMG_SHA_TARGET"
+          mv "$ZIP_SOURCE" "$ZIP_TARGET"
+          mv "$ZIP_SHA_SOURCE" "$ZIP_SHA_TARGET"
+          echo "artifact_name=xcodemcpservice-${SAFE_NAME}" >> "$GITHUB_OUTPUT"
+          echo "dmg_path=$DMG_TARGET" >> "$GITHUB_OUTPUT"
+          echo "dmg_sha_path=$DMG_SHA_TARGET" >> "$GITHUB_OUTPUT"
+          echo "zip_path=$ZIP_TARGET" >> "$GITHUB_OUTPUT"
+          echo "zip_sha_path=$ZIP_SHA_TARGET" >> "$GITHUB_OUTPUT"
+
+      - name: Upload packaged artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.asset_names.outputs.artifact_name }}
+          if-no-files-found: error
+          path: |
+            build/XCode MCP Service.app
+            ${{ steps.asset_names.outputs.dmg_path }}
+            ${{ steps.asset_names.outputs.dmg_sha_path }}
+            ${{ steps.asset_names.outputs.zip_path }}
+            ${{ steps.asset_names.outputs.zip_sha_path }}
+
+      - name: Publish GitHub release assets
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG_NAME: ${{ github.ref_name }}
+          DMG_PATH: ${{ steps.asset_names.outputs.dmg_path }}
+          DMG_SHA_PATH: ${{ steps.asset_names.outputs.dmg_sha_path }}
+          ZIP_PATH: ${{ steps.asset_names.outputs.zip_path }}
+          ZIP_SHA_PATH: ${{ steps.asset_names.outputs.zip_sha_path }}
+        run: |
+          if gh release view "$TAG_NAME" >/dev/null 2>&1; then
+            gh release upload "$TAG_NAME" "$DMG_PATH" "$DMG_SHA_PATH" "$ZIP_PATH" "$ZIP_SHA_PATH" --clobber
+            exit 0
+          fi
+          gh release create "$TAG_NAME" "$DMG_PATH" "$DMG_SHA_PATH" "$ZIP_PATH" "$ZIP_SHA_PATH" \
+            --generate-notes \
+            --title "$TAG_NAME"

@@ -45,7 +45,16 @@ Build output is at `build/XCode MCP Service.app`, containing:
 | Status bar app | `Contents/MacOS/XCodeMCPStatusBar` | Main entry, visual status bar management |
 | CLI service | `Contents/MacOS/XCodeMCPService` | Command-line service (for background use) |
 
-> You can also run `swift build -c release` to get standalone binaries at `.build/release/`.
+The packaging script also produces:
+
+| Artifact | Path | Description |
+|----------|------|-------------|
+| Disk image | `build/XCodeMCPService.dmg` | Recommended macOS release package |
+| SHA-256 | `build/XCodeMCPService.dmg.sha256` | Disk image checksum |
+| Zip archive | `build/XCodeMCPService.app.zip` | Unsigned distributable package |
+| SHA-256 | `build/XCodeMCPService.app.zip.sha256` | Archive checksum |
+
+> You can locate standalone binaries with `swift build -c release --show-bin-path`.
 
 ## Quick Start
 
@@ -85,13 +94,14 @@ Save as `~/Library/Application Support/XCodeMCPService/config.json`.
 open "/Applications/XCode MCP Service.app"
 
 # Or via CLI
-.build/release/XCodeMCPService
+BIN_DIR="$(swift build -c release --show-bin-path)"
+"$BIN_DIR/XCodeMCPService"
 
 # Specify config file
-.build/release/XCodeMCPService --config /path/to/config.json
+"$BIN_DIR/XCodeMCPService" --config /path/to/config.json
 
 # Via environment variable
-CONFIG_PATH=/path/to/config.json .build/release/XCodeMCPService
+CONFIG_PATH=/path/to/config.json "$BIN_DIR/XCodeMCPService"
 ```
 
 ### 3. Configure MCP client
@@ -148,6 +158,12 @@ swift test
 ```
 
 83 tests covering: HTTP parsing/serialization/routing, session management, ResponseQueue, ID mapping, process lifecycle management, etc.
+
+## CI/CD
+
+- `.github/workflows/ci.yml`: runs `swift build -c release` and `swift test --parallel` on every push and pull request.
+- `.github/workflows/release.yml`: runs `bash build-app.sh` on every `v*` tag push or manual dispatch, then uploads the `.app` bundle, `dmg`, `zip`, and SHA-256 checksum files as workflow artifacts.
+- Tag builds also publish `build/XCodeMCPService-<tag>.dmg`, `build/XCodeMCPService-<tag>.dmg.sha256`, `build/XCodeMCPService-<tag>.zip`, and `build/XCodeMCPService-<tag>.zip.sha256` to the matching GitHub Release.
 
 ## License
 
