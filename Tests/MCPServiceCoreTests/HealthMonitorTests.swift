@@ -152,9 +152,9 @@ struct RestartPolicyHealthCodableTests {
         #expect(policy.backoffMaxMs == 10000)
         #expect(policy.resetAfterMs == 30000)
         // Health fields should get defaults
-        #expect(policy.healthCheckIntervalMs == 30000)
+        #expect(policy.healthCheckIntervalMs == 10000)
         #expect(policy.hangTimeoutMs == 10000)
-        #expect(policy.hangThreshold == 3)
+        #expect(policy.hangThreshold == 2)
     }
 
     @Test("Decodes with explicit health field values")
@@ -286,6 +286,7 @@ struct HealthCheckLogicTests {
 
         await manager.dispose()
     }
+
 }
 
 // MARK: - Reconnection Tests

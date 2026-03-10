@@ -180,6 +180,7 @@ public actor BridgeServer {
             policy: policy,
             callbacks: callbacks
         )
+        await router.setRuntimeHealthReporter(lifecycleManager)
         await lifecycleManager.monitorAll()
         self.lifecycleManager = lifecycleManager
 

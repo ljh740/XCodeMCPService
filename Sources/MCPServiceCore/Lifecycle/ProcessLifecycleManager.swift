@@ -23,9 +23,9 @@ public struct RestartPolicy: Codable, Sendable {
         backoffBaseMs: Int = 1000,
         backoffMaxMs: Int = 30000,
         resetAfterMs: Int = 60000,
-        healthCheckIntervalMs: Int = 30000,
+        healthCheckIntervalMs: Int = 10000,
         hangTimeoutMs: Int = 10000,
-        hangThreshold: Int = 3,
+        hangThreshold: Int = 2,
         maxHangCycles: Int = 3
     ) {
         self.maxRestarts = max(maxRestarts, 0)
@@ -49,15 +49,15 @@ public struct RestartPolicy: Codable, Sendable {
         backoffBaseMs = max(try container.decodeIfPresent(Int.self, forKey: .backoffBaseMs) ?? 1000, 0)
         backoffMaxMs = max(try container.decodeIfPresent(Int.self, forKey: .backoffMaxMs) ?? 30000, 0)
         resetAfterMs = max(try container.decodeIfPresent(Int.self, forKey: .resetAfterMs) ?? 60000, 0)
-        healthCheckIntervalMs = max(try container.decodeIfPresent(Int.self, forKey: .healthCheckIntervalMs) ?? 30000, 1)
+        healthCheckIntervalMs = max(try container.decodeIfPresent(Int.self, forKey: .healthCheckIntervalMs) ?? 10000, 1)
         hangTimeoutMs = max(try container.decodeIfPresent(Int.self, forKey: .hangTimeoutMs) ?? 10000, 1)
-        hangThreshold = max(try container.decodeIfPresent(Int.self, forKey: .hangThreshold) ?? 3, 1)
+        hangThreshold = max(try container.decodeIfPresent(Int.self, forKey: .hangThreshold) ?? 2, 1)
         maxHangCycles = max(try container.decodeIfPresent(Int.self, forKey: .maxHangCycles) ?? 3, 1)
     }
 
     public static let `default` = RestartPolicy(
         maxRestarts: 5, backoffBaseMs: 1000, backoffMaxMs: 30000, resetAfterMs: 60000,
-        healthCheckIntervalMs: 30000, hangTimeoutMs: 10000, hangThreshold: 3, maxHangCycles: 3
+        healthCheckIntervalMs: 10000, hangTimeoutMs: 10000, hangThreshold: 2, maxHangCycles: 3
     )
 }
 
@@ -70,6 +70,8 @@ public struct ProcessState: Sendable {
     public var lastRestartAt: Date? = nil
     public var firstFailureAt: Date? = nil
     public var isRestarting: Bool = false
+    /// 当前运行实例代际，用于忽略旧请求在重连后的迟到超时。
+    public var requestGeneration: UInt64 = 1
     /// 上次健康检查时间
     public var lastHealthCheckAt: Date? = nil
     /// 连续健康检查失败次数
@@ -130,7 +132,7 @@ public enum LifecycleEvent: Sendable {
 // MARK: - ProcessLifecycleManager
 
 /// 监控子进程健康状态，实现崩溃检测和自动重启（指数退避）
-public actor ProcessLifecycleManager {
+public actor ProcessLifecycleManager: RuntimeHealthReporting {
 
     // MARK: - Properties
 
@@ -191,6 +193,56 @@ public actor ProcessLifecycleManager {
         logger.info("Monitoring all active servers", metadata: [
             "count": "\(activeServers.count)",
         ])
+    }
+
+    public func currentHealthGeneration(serverName: String) -> UInt64? {
+        guard !disposed, monitoredServers.contains(serverName) else { return nil }
+        return processStates[serverName]?.requestGeneration
+    }
+
+    /// 记录真实业务请求超时，避免仅靠周期性 ping 才发现下游已经卡死。
+    public func recordRequestTimeout(
+        serverName: String,
+        operation: String,
+        generation: UInt64?
+    ) async {
+        guard !disposed, monitoredServers.contains(serverName) else { return }
+        guard processStates[serverName]?.isRestarting != true else { return }
+        let currentGeneration = processStates[serverName]?.requestGeneration
+        if let generation, generation != currentGeneration {
+            logger.debug("Ignoring stale request timeout", metadata: [
+                "server": serverName,
+                "operation": operation,
+                "requestGeneration": "\(generation)",
+                "currentGeneration": "\(currentGeneration ?? 0)",
+            ])
+            return
+        }
+
+        processStates[serverName]?.consecutiveHealthFailures += 1
+        processStates[serverName]?.lastHealthCheckAt = Date()
+        let failures = processStates[serverName]?.consecutiveHealthFailures ?? 0
+
+        logger.warning("Request timeout recorded", metadata: [
+            "server": serverName,
+            "operation": operation,
+            "generation": "\(currentGeneration ?? 0)",
+            "consecutiveFailures": "\(failures)",
+            "threshold": "\(policy.hangThreshold)",
+        ])
+        callbacks.onHealthCheckFailed?(serverName, failures)
+
+        guard failures >= policy.hangThreshold else { return }
+
+        logger.error("Request timeouts reached hang threshold, triggering reconnection", metadata: [
+            "server": serverName,
+            "operation": operation,
+            "generation": "\(currentGeneration ?? 0)",
+            "consecutiveFailures": "\(failures)",
+            "threshold": "\(policy.hangThreshold)",
+        ])
+        callbacks.onHangDetected?(serverName)
+        await reconnectHungServer(serverName: serverName)
     }
 
     // MARK: - Crash Handling
@@ -309,11 +361,13 @@ public actor ProcessLifecycleManager {
                 }
 
                 processStates[serverName]?.lastRestartAt = Date()
+                let generation = advanceRequestGeneration(serverName: serverName)
                 processStates[serverName]?.consecutiveHealthFailures = 0
 
                 logger.info("Restart succeeded", metadata: [
                     "server": serverName,
                     "attempt": "\(attempt)",
+                    "generation": "\(generation)",
                 ])
                 callbacks.onRestarted?(serverName)
 
@@ -349,6 +403,13 @@ public actor ProcessLifecycleManager {
         processStates[serverName]?.restartCount = 0
         processStates[serverName]?.firstFailureAt = nil
         logger.debug("Restart count reset", metadata: ["server": serverName])
+    }
+
+    private func advanceRequestGeneration(serverName: String) -> UInt64 {
+        var state = processStates[serverName] ?? ProcessState(serverName: serverName)
+        state.requestGeneration += 1
+        processStates[serverName] = state
+        return state.requestGeneration
     }
 
     // MARK: - Health Check
@@ -607,11 +668,13 @@ public actor ProcessLifecycleManager {
                 }
 
                 processStates[serverName]?.lastRestartAt = Date()
+                let generation = advanceRequestGeneration(serverName: serverName)
                 processStates[serverName]?.consecutiveHealthFailures = 0
 
                 logger.info("Hang reconnection succeeded", metadata: [
                     "server": serverName,
                     "attempt": "\(attempt)",
+                    "generation": "\(generation)",
                     "hangCycle": "\(processStates[serverName]?.hangCycleCount ?? 0)",
                 ])
                 callbacks.onRestarted?(serverName)

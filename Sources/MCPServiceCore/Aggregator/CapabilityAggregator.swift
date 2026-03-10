@@ -52,13 +52,13 @@ public actor CapabilityAggregator {
     private var aggregatedTools: [AggregatedTool] = []
     private var aggregatedResources: [AggregatedResource] = []
     private var aggregatedPrompts: [AggregatedPrompt] = []
-    private let clientManager: StdioClientManager
+    private let clientManager: any StdioClientManaging
 
     private let logger = bridgeLogger.child(label: "capability-aggregator")
 
     // MARK: - Init
 
-    public init(clientManager: StdioClientManager) {
+    public init(clientManager: any StdioClientManaging) {
         self.clientManager = clientManager
     }
 

@@ -30,25 +30,31 @@ private struct TimeoutError: Error {}
 /// 将请求路由到正确的下游 MCP 服务器。
 /// 解析前缀名称，找到目标服务器，通过 MCP Client 转发请求并返回结果。
 public actor RequestRouter {
-
     // MARK: - Properties
 
-    private let clientManager: StdioClientManager
+    private let clientManager: any StdioClientManaging
     private let aggregator: CapabilityAggregator
     private let timeout: Int
     private let logger: BridgeLogger
+    private var runtimeHealthReporter: (any RuntimeHealthReporting)?
 
     // MARK: - Init
 
     public init(
-        clientManager: StdioClientManager,
+        clientManager: any StdioClientManaging,
         aggregator: CapabilityAggregator,
-        timeout: Int = 30000
+        timeout: Int = 30000,
+        runtimeHealthReporter: (any RuntimeHealthReporting)? = nil
     ) {
         self.clientManager = clientManager
         self.aggregator = aggregator
         self.timeout = timeout
         self.logger = bridgeLogger.child(label: "request-router")
+        self.runtimeHealthReporter = runtimeHealthReporter
+    }
+
+    public func setRuntimeHealthReporter(_ reporter: (any RuntimeHealthReporting)?) {
+        self.runtimeHealthReporter = reporter
     }
 
     // MARK: - Route: Tool Call
@@ -74,6 +80,7 @@ public actor RequestRouter {
                 message: "Server not running: \(resolved.serverName)"
             )
         }
+        let requestGeneration = await currentHealthGeneration(serverName: resolved.serverName)
 
         // 带超时调用
         do {
@@ -88,8 +95,14 @@ public actor RequestRouter {
         } catch is TimeoutError {
             logger.error("Tool call timed out", metadata: [
                 "tool": prefixedName,
+                "server": resolved.serverName,
                 "timeoutMs": "\(timeout)",
             ])
+            reportTimeout(
+                serverName: resolved.serverName,
+                operation: "tool:\(prefixedName)",
+                generation: requestGeneration
+            )
             return .failure(
                 code: ErrorCodes.timeout,
                 message: "Tool call timed out after \(timeout)ms: \(prefixedName)"
@@ -126,6 +139,7 @@ public actor RequestRouter {
                 message: "Server not running: \(resolved.serverName)"
             )
         }
+        let requestGeneration = await currentHealthGeneration(serverName: resolved.serverName)
 
         do {
             let contents = try await withTimeout(timeout) {
@@ -139,8 +153,14 @@ public actor RequestRouter {
         } catch is TimeoutError {
             logger.error("Resource read timed out", metadata: [
                 "uri": prefixedUri,
+                "server": resolved.serverName,
                 "timeoutMs": "\(timeout)",
             ])
+            reportTimeout(
+                serverName: resolved.serverName,
+                operation: "resource:\(prefixedUri)",
+                generation: requestGeneration
+            )
             return .failure(
                 code: ErrorCodes.timeout,
                 message: "Resource read timed out after \(timeout)ms: \(prefixedUri)"
@@ -178,6 +198,7 @@ public actor RequestRouter {
                 message: "Server not running: \(resolved.serverName)"
             )
         }
+        let requestGeneration = await currentHealthGeneration(serverName: resolved.serverName)
 
         do {
             let result = try await withTimeout(timeout) {
@@ -192,8 +213,14 @@ public actor RequestRouter {
         } catch is TimeoutError {
             logger.error("Prompt get timed out", metadata: [
                 "prompt": prefixedName,
+                "server": resolved.serverName,
                 "timeoutMs": "\(timeout)",
             ])
+            reportTimeout(
+                serverName: resolved.serverName,
+                operation: "prompt:\(prefixedName)",
+                generation: requestGeneration
+            )
             return .failure(
                 code: ErrorCodes.timeout,
                 message: "Prompt get timed out after \(timeout)ms: \(prefixedName)"
@@ -223,6 +250,22 @@ public actor RequestRouter {
             return nil
         }
         return client
+    }
+
+    private func currentHealthGeneration(serverName: String) async -> UInt64? {
+        guard let runtimeHealthReporter else { return nil }
+        return await runtimeHealthReporter.currentHealthGeneration(serverName: serverName)
+    }
+
+    private func reportTimeout(serverName: String, operation: String, generation: UInt64?) {
+        guard let runtimeHealthReporter else { return }
+        Task {
+            await runtimeHealthReporter.recordRequestTimeout(
+                serverName: serverName,
+                operation: operation,
+                generation: generation
+            )
+        }
     }
 
     // MARK: - Private: Timeout
