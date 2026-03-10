@@ -180,6 +180,11 @@ public actor BridgeServer {
             policy: policy,
             callbacks: callbacks
         )
+        await clientManager.setServerExitHandler { name in
+            Task {
+                await lifecycleManager.handleCrash(serverName: name)
+            }
+        }
         await router.setRuntimeHealthReporter(lifecycleManager)
         await lifecycleManager.monitorAll()
         self.lifecycleManager = lifecycleManager

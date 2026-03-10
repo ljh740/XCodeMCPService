@@ -59,6 +59,7 @@ public actor PipeTransport: Transport {
 
     public func connect() async throws {
         guard !isConnected else { return }
+        try Self.configureWriteEnd(writeFD)
         isConnected = true
         logger.debug("PipeTransport connected, readFD=\(readFD), writeFD=\(writeFD)")
 
@@ -86,8 +87,12 @@ public actor PipeTransport: Transport {
     public func send(_ data: Data) async throws {
         guard isConnected else {
             throw MCPError.transportError(
-                NSError(domain: "PipeTransport", code: -1,
-                        userInfo: [NSLocalizedDescriptionKey: "Not connected"]))
+                NSError(
+                    domain: NSPOSIXErrorDomain,
+                    code: Int(ENOTCONN),
+                    userInfo: [NSLocalizedDescriptionKey: "Not connected"]
+                )
+            )
         }
 
         // 将字符串 id 替换为整数 id，兼容不支持字符串 id 的 MCP 服务器
@@ -102,9 +107,20 @@ public actor PipeTransport: Transport {
             Darwin.write(writeFD, buffer.baseAddress!, buffer.count)
         }
         if written < 0 {
+            let err = errno
+            if Self.isDisconnectErrno(err) {
+                isConnected = false
+                logger.notice("PipeTransport write failed, marking disconnected", metadata: [
+                    "errno": "\(err)"
+                ])
+            }
             throw MCPError.transportError(
-                NSError(domain: "PipeTransport", code: Int(errno),
-                        userInfo: [NSLocalizedDescriptionKey: "Write failed: \(errno)"]))
+                NSError(
+                    domain: NSPOSIXErrorDomain,
+                    code: Int(err),
+                    userInfo: [NSLocalizedDescriptionKey: "Write failed: \(err)"]
+                )
+            )
         }
     }
 
@@ -161,6 +177,27 @@ public actor PipeTransport: Transport {
         }
 
         continuation.finish()
+    }
+
+    private static func isDisconnectErrno(_ err: Int32) -> Bool {
+        err == EPIPE || err == EBADF || err == ENOTCONN
+    }
+
+    private static func configureWriteEnd(_ fd: Int32) throws {
+#if canImport(Darwin)
+        let result = fcntl(fd, F_SETNOSIGPIPE, 1)
+        guard result == 0 else {
+            throw MCPError.transportError(
+                NSError(
+                    domain: NSPOSIXErrorDomain,
+                    code: Int(errno),
+                    userInfo: [NSLocalizedDescriptionKey: "Failed to disable SIGPIPE on write fd"]
+                )
+            )
+        }
+#else
+        _ = fd
+#endif
     }
 }
 

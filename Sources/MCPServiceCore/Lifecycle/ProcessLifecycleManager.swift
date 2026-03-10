@@ -479,6 +479,7 @@ public actor ProcessLifecycleManager: RuntimeHealthReporting {
             } catch is AsyncTimeoutError {
                 // Timeout: server is unresponsive (hung)
                 guard !disposed, monitoredServers.contains(serverName) else { return }
+                guard processStates[serverName]?.isRestarting != true else { return }
 
                 processStates[serverName]?.consecutiveHealthFailures += 1
                 let failures = processStates[serverName]?.consecutiveHealthFailures ?? 0
@@ -504,6 +505,18 @@ public actor ProcessLifecycleManager: RuntimeHealthReporting {
             } catch {
                 // Non-timeout error (e.g. transport failure, broken pipe).
                 guard !disposed, monitoredServers.contains(serverName) else { return }
+                guard processStates[serverName]?.isRestarting != true else { return }
+
+                if isDisconnectLikeError(error) {
+                    processStates[serverName]?.lastHealthCheckAt = Date()
+                    logger.error("Transport disconnected, triggering reconnection", metadata: [
+                        "server": serverName,
+                        "error": "\(error)",
+                    ])
+                    callbacks.onHangDetected?(serverName)
+                    await reconnectHungServer(serverName: serverName)
+                    return
+                }
 
                 // Ping is optional in MCP; servers that don't implement it return
                 // methodNotFound. Treat this as a successful health check — the

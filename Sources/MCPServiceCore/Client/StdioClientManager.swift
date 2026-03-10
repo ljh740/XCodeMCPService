@@ -33,6 +33,7 @@ public actor StdioClientManager: StdioClientManaging {
 
     private var serverConfigs: [String: ServerConfig]
     private var servers: [String: ServerInfo] = [:]
+    private var onServerExit: (@Sendable (String) -> Void)?
 
     private let logger = bridgeLogger.child(label: "client-manager")
 
@@ -44,6 +45,10 @@ public actor StdioClientManager: StdioClientManaging {
             map[config.name] = config
         }
         self.serverConfigs = map
+    }
+
+    public func setServerExitHandler(_ handler: (@Sendable (String) -> Void)?) {
+        onServerExit = handler
     }
 
     // MARK: - Lifecycle
@@ -79,10 +84,24 @@ public actor StdioClientManager: StdioClientManaging {
         process.standardOutput = stdoutPipe
         // 将 stderr 重定向到 /dev/null，避免子进程 stderr 污染父进程输出
         process.standardError = FileHandle.nullDevice
+        process.terminationHandler = { [name] process in
+            let pid = process.processIdentifier
+            let status = process.terminationStatus
+            let reason = process.terminationReason == .exit ? "exit" : "signal"
+            Task {
+                await self.handleProcessTermination(
+                    name: name,
+                    pid: pid,
+                    status: status,
+                    reason: reason
+                )
+            }
+        }
 
         do {
             try process.run()
         } catch {
+            process.terminationHandler = nil
             try? stdinPipe.fileHandleForWriting.close()
             try? stdoutPipe.fileHandleForReading.close()
             throw BridgeError.internalError("Failed to start server '\(name)': \(error)")
@@ -114,6 +133,7 @@ public actor StdioClientManager: StdioClientManaging {
                 "timeoutMs": "\(Self.connectTimeoutMs)",
                 "elapsed": "\(elapsed)",
             ])
+            process.terminationHandler = nil
             await client.disconnect()
             kill(process.processIdentifier, SIGKILL)
             try? stdinPipe.fileHandleForWriting.close()
@@ -123,6 +143,7 @@ public actor StdioClientManager: StdioClientManaging {
         } catch {
             // Connection failed — process is useless; use SIGKILL for immediate cleanup
             // (SIGTERM may be ignored by a stuck child, causing process leaks)
+            process.terminationHandler = nil
             await client.disconnect()
             kill(process.processIdentifier, SIGKILL)
             try? stdinPipe.fileHandleForWriting.close()
@@ -163,6 +184,7 @@ public actor StdioClientManager: StdioClientManaging {
             logger.warning("Server '\(name)' not found in running servers")
             return
         }
+        info.process.terminationHandler = nil
 
         // Ensure pipes are closed on all exit paths to prevent fd leaks
         defer {
@@ -300,5 +322,40 @@ public actor StdioClientManager: StdioClientManaging {
     /// 检查指定服务器是否正在运行
     public func isServerRunning(name: String) -> Bool {
         servers[name] != nil
+    }
+
+    private func handleProcessTermination(
+        name: String,
+        pid: Int32,
+        status: Int32,
+        reason: String
+    ) async {
+        guard let info = servers[name] else {
+            logger.debug("Ignoring termination callback for unmanaged server", metadata: [
+                "server": name,
+                "pid": "\(pid)",
+            ])
+            return
+        }
+        guard info.process.processIdentifier == pid else {
+            logger.debug("Ignoring stale termination callback", metadata: [
+                "server": name,
+                "pid": "\(pid)",
+                "currentPid": "\(info.process.processIdentifier)",
+            ])
+            return
+        }
+
+        servers.removeValue(forKey: name)
+        await info.client.disconnect()
+        try? info.stdinPipe.fileHandleForWriting.close()
+        try? info.stdoutPipe.fileHandleForReading.close()
+
+        logger.warning("Server '\(name)' process exited", metadata: [
+            "pid": "\(pid)",
+            "status": "\(status)",
+            "reason": reason,
+        ])
+        onServerExit?(name)
     }
 }
