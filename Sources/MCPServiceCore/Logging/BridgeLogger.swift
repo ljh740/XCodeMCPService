@@ -3,26 +3,17 @@ import Logging
 
 // MARK: - FileLogHandler
 
-/// 日志时间戳格式（值类型，线程安全）
-private let logDateFormatStyle = Date.ISO8601FormatStyle(
-    dateSeparator: .dash,
-    dateTimeSeparator: .standard,
-    timeSeparator: .colon,
-    timeZoneSeparator: .omitted,
-    includingFractionalSeconds: true
-)
-
 /// 将日志写入文件的 LogHandler
 struct FileLogHandler: LogHandler {
     var metadata: Logger.Metadata = [:]
     var logLevel: Logger.Level = .info
 
     private let label: String
-    private let fileHandle: FileHandle
+    private let writer: DailyRollingFileWriter
 
-    init(label: String, fileHandle: FileHandle) {
+    init(label: String, writer: DailyRollingFileWriter) {
         self.label = label
-        self.fileHandle = fileHandle
+        self.writer = writer
     }
 
     subscript(metadataKey key: String) -> Logger.Metadata.Value? {
@@ -39,40 +30,13 @@ struct FileLogHandler: LogHandler {
         function: String,
         line: UInt
     ) {
-        let timestamp = Date.now.formatted(logDateFormatStyle)
-        let merged = self.metadata.merging(metadata ?? [:]) { _, new in new }
-        let metaStr = merged.isEmpty ? "" : " \(merged.map { "\($0)=\($1)" }.joined(separator: " "))"
-        let text = "\(timestamp) [\(level)] [\(label)] \(message)\(metaStr)\n"
-        if let data = text.data(using: .utf8) {
-            fileHandle.write(data)
-        }
-    }
-}
-
-// MARK: - Log Directory
-
-/// 日志目录：~/Library/Application Support/XCodeMCPService/logs/
-public let logDirectory: String = {
-    let home = FileManager.default.homeDirectoryForCurrentUser.path
-    return "\(home)/Library/Application Support/XCodeMCPService/logs"
-}()
-
-/// 创建日志文件并返回 FileHandle，失败返回 nil
-private func createLogFileHandle() -> FileHandle? {
-    let fm = FileManager.default
-    try? fm.createDirectory(atPath: logDirectory, withIntermediateDirectories: true)
-
-    let formatter = DateFormatter()
-    formatter.dateFormat = "yyyy-MM-dd"
-    let dateStr = formatter.string(from: Date())
-    let logPath = "\(logDirectory)/\(dateStr).log"
-
-    if !fm.fileExists(atPath: logPath) {
-        fm.createFile(atPath: logPath, contents: nil)
-    }
-    return FileHandle(forWritingAtPath: logPath).map { handle in
-        handle.seekToEndOfFile()
-        return handle
+        writer.write(
+            label: label,
+            level: level,
+            message: message,
+            metadata: metadata,
+            baseMetadata: self.metadata
+        )
     }
 }
 
@@ -80,14 +44,11 @@ private func createLogFileHandle() -> FileHandle? {
 
 /// 全局初始化一次：注册 MultiplexLogHandler（stderr + 文件）
 private let bootstrapOnce: Void = {
-    let fileHandle = createLogFileHandle()
     LoggingSystem.bootstrap { label in
         var handlers: [LogHandler] = [
             StreamLogHandler.standardError(label: label)
         ]
-        if let fileHandle {
-            handlers.append(FileLogHandler(label: label, fileHandle: fileHandle))
-        }
+        handlers.append(FileLogHandler(label: label, writer: sharedLogFileWriter))
         return MultiplexLogHandler(handlers)
     }
 }()
