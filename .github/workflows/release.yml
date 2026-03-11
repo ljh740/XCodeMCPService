@@ -19,7 +19,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           fetch-depth: 0
           fetch-tags: true
@@ -58,7 +58,7 @@ jobs:
           echo "zip_sha_path=$ZIP_SHA_TARGET" >> "$GITHUB_OUTPUT"
 
       - name: Upload packaged artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: ${{ steps.asset_names.outputs.artifact_name }}
           if-no-files-found: error
