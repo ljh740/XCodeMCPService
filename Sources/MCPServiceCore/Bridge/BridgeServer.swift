@@ -11,7 +11,7 @@ public actor BridgeServer {
 
     // MARK: - Constants
 
-    private let version = "1.0.4"
+    private let version = "1.0.5"
 
     // MARK: - Properties
 
