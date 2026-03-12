@@ -52,4 +52,64 @@ struct HTTPServerRoutingTests {
         // No "id" key → notification
         #expect(HTTPParser.isJSONRPCNotification(data) == true)
     }
+
+    @Test("routeRequest returns JSON-RPC parse error for invalid JSON body")
+    func routeRequestInvalidJSONBody() async throws {
+        let server = HTTPServer(port: 13339)
+        let request = HTTPRequest(
+            method: "POST",
+            path: "/mcp",
+            headers: ["content-type": "application/json"],
+            body: Data("{".utf8),
+            clientIP: nil
+        )
+
+        let response = await server.routeRequest(request)
+        let json = try #require(try JSONSerialization.jsonObject(with: response.body ?? Data()) as? [String: Any])
+        let error = try #require(json["error"] as? [String: Any])
+
+        #expect(response.statusCode == 200)
+        #expect((json["id"] is NSNull) == true)
+        #expect(error["code"] as? Int == ErrorCodes.parseError)
+    }
+
+    @Test("routeRequest returns JSON-RPC invalidRequest for unsupported id type")
+    func routeRequestInvalidIDType() async throws {
+        let server = HTTPServer(port: 13339)
+        let request = HTTPRequest(
+            method: "POST",
+            path: "/mcp",
+            headers: ["content-type": "application/json"],
+            body: Data(#"{"jsonrpc":"2.0","id":true,"method":"ping"}"#.utf8),
+            clientIP: nil
+        )
+
+        let response = await server.routeRequest(request)
+        let json = try #require(try JSONSerialization.jsonObject(with: response.body ?? Data()) as? [String: Any])
+        let error = try #require(json["error"] as? [String: Any])
+
+        #expect(response.statusCode == 200)
+        #expect((json["id"] is NSNull) == true)
+        #expect(error["code"] as? Int == ErrorCodes.invalidRequest)
+    }
+
+    @Test("routeRequest returns JSON-RPC internalError when factory is missing")
+    func routeRequestMissingFactory() async throws {
+        let server = HTTPServer(port: 13339)
+        let request = HTTPRequest(
+            method: "POST",
+            path: "/mcp",
+            headers: ["content-type": "application/json"],
+            body: Data(#"{"jsonrpc":"2.0","id":"build","method":"tools/call"}"#.utf8),
+            clientIP: nil
+        )
+
+        let response = await server.routeRequest(request)
+        let json = try #require(try JSONSerialization.jsonObject(with: response.body ?? Data()) as? [String: Any])
+        let error = try #require(json["error"] as? [String: Any])
+
+        #expect(response.statusCode == 200)
+        #expect(json["id"] as? String == "build")
+        #expect(error["code"] as? Int == ErrorCodes.internalError)
+    }
 }

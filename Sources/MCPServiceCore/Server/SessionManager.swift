@@ -47,7 +47,7 @@ actor SessionManager {
         try await clientTransport.connect()
         try await server.start(transport: serverTransport)
 
-        let responseQueue = ResponseQueue()
+        let responseQueue = ResponseQueue(logger: logger.child(label: "response-queue"))
         await responseQueue.start(transport: clientTransport)
 
         let session = SessionInfo(

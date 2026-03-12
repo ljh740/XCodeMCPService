@@ -6,9 +6,32 @@ import Testing
 @Suite("ResponseQueue Tests")
 struct ResponseQueueTests {
 
+    private func makeQueue() async throws -> (
+        queue: ResponseQueue,
+        clientTransport: InMemoryTransport,
+        serverTransport: InMemoryTransport
+    ) {
+        let (clientTransport, serverTransport) = await InMemoryTransport.createConnectedPair()
+        try await clientTransport.connect()
+        try await serverTransport.connect()
+
+        let queue = ResponseQueue(logger: BridgeLogger(label: "test.response-queue"))
+        await queue.start(transport: clientTransport)
+        return (queue, clientTransport, serverTransport)
+    }
+
+    private func makeResponse(id: Any, value: String) throws -> Data {
+        let payload: [String: Any] = [
+            "jsonrpc": "2.0",
+            "id": id,
+            "result": ["value": value],
+        ]
+        return try JSONSerialization.data(withJSONObject: payload, options: [])
+    }
+
     @Test("Initial metrics are zero")
     func initialMetrics() async {
-        let queue = ResponseQueue()
+        let queue = ResponseQueue(logger: BridgeLogger(label: "test.response-queue"))
         let metrics = await queue.getMetrics()
         #expect(metrics.buffered == 0)
         #expect(metrics.dropped == 0)
@@ -16,162 +39,127 @@ struct ResponseQueueTests {
 
     @Test("Stop clears waiters and buffer")
     func stopClears() async {
-        let queue = ResponseQueue()
+        let queue = ResponseQueue(logger: BridgeLogger(label: "test.response-queue"))
         await queue.stop()
         let metrics = await queue.getMetrics()
         #expect(metrics.buffered == 0)
         #expect(metrics.dropped == 0)
     }
 
-    @Test("Single message enqueue then dequeue via transport")
+    @Test("Single response is matched by request id")
     func singleMessageRoundTrip() async throws {
-        let (clientTransport, serverTransport) = await InMemoryTransport.createConnectedPair()
-        try await clientTransport.connect()
-        try await serverTransport.connect()
-
-        let queue = ResponseQueue()
-        await queue.start(transport: clientTransport)
-
-        // 通过 serverTransport 发送数据（模拟 MCP server 响应）
-        let testData = Data(#"{"jsonrpc":"2.0","id":1,"result":{}}"#.utf8)
+        let (queue, _, serverTransport) = try await makeQueue()
+        let testData = try makeResponse(id: 1, value: "ok")
         try await serverTransport.send(testData)
 
-        let received = try await queue.waitForNext(timeoutSeconds: 5)
+        let received = try await queue.waitForResponse(id: .integer(1), timeoutMs: 5_000)
         #expect(received == testData)
 
         await queue.stop()
     }
 
-    @Test("Multiple messages maintain FIFO order")
-    func fifoOrdering() async throws {
-        let (clientTransport, serverTransport) = await InMemoryTransport.createConnectedPair()
-        try await clientTransport.connect()
-        try await serverTransport.connect()
+    @Test("Concurrent responses are matched by id even when arrival order is reversed")
+    func outOfOrderResponsesMatchCorrectWaiters() async throws {
+        let (queue, _, serverTransport) = try await makeQueue()
+        let buildResponse = try makeResponse(id: "build", value: "build")
+        let logResponse = try makeResponse(id: "log", value: "log")
 
-        let queue = ResponseQueue()
-        await queue.start(transport: clientTransport)
+        async let buildWait = queue.waitForResponse(id: .string("build"), timeoutMs: 5_000)
+        async let logWait = queue.waitForResponse(id: .string("log"), timeoutMs: 5_000)
 
-        let msg1 = Data(#"{"id":1}"#.utf8)
-        let msg2 = Data(#"{"id":2}"#.utf8)
-        let msg3 = Data(#"{"id":3}"#.utf8)
+        try await Task.sleep(for: .milliseconds(50))
+        try await serverTransport.send(logResponse)
+        try await serverTransport.send(buildResponse)
 
-        try await serverTransport.send(msg1)
-        try await serverTransport.send(msg2)
-        try await serverTransport.send(msg3)
+        let receivedBuild = try await buildWait
+        let receivedLog = try await logWait
 
-        // 短暂等待让消息进入缓冲区
-        try await Task.sleep(nanoseconds: 50_000_000)
-
-        let r1 = try await queue.waitForNext(timeoutSeconds: 5)
-        let r2 = try await queue.waitForNext(timeoutSeconds: 5)
-        let r3 = try await queue.waitForNext(timeoutSeconds: 5)
-
-        #expect(r1 == msg1)
-        #expect(r2 == msg2)
-        #expect(r3 == msg3)
-
-        await queue.stop()
-    }
-
-    @Test("waitForNext blocks until data arrives")
-    func waiterResolution() async throws {
-        let (clientTransport, serverTransport) = await InMemoryTransport.createConnectedPair()
-        try await clientTransport.connect()
-        try await serverTransport.connect()
-
-        let queue = ResponseQueue()
-        await queue.start(transport: clientTransport)
-
-        let testData = Data(#"{"delayed":true}"#.utf8)
-
-        // 先启动等待，然后延迟发送
-        async let waitResult = queue.waitForNext(timeoutSeconds: 5)
-
-        // 短暂延迟后发送
-        try await Task.sleep(nanoseconds: 100_000_000)
-        try await serverTransport.send(testData)
-
-        let received = try await waitResult
-        #expect(received == testData)
+        #expect(receivedBuild == buildResponse)
+        #expect(receivedLog == logResponse)
 
         await queue.stop()
     }
 
     @Test("stop() causes pending waiters to throw error")
     func stopCancelsPendingWaiters() async throws {
-        let (clientTransport, _) = await InMemoryTransport.createConnectedPair()
-        try await clientTransport.connect()
-
-        let queue = ResponseQueue()
-        await queue.start(transport: clientTransport)
-
-        // 启动等待（不会有数据到达）
+        let (queue, _, _) = try await makeQueue()
         let waitTask = Task {
-            try await queue.waitForNext(timeoutSeconds: 30)
+            try await queue.waitForResponse(id: .string("pending"), timeoutMs: 30_000)
         }
 
-        // 短暂延迟后 stop
-        try await Task.sleep(nanoseconds: 50_000_000)
+        try await Task.sleep(for: .milliseconds(50))
         await queue.stop()
 
-        // 等待应该抛出错误
-        do {
+        await #expect(throws: (any Error).self) {
             _ = try await waitTask.value
-            Issue.record("Expected error from stopped queue")
-        } catch {
-            // 预期行为：stop 导致 waiter 收到错误
         }
     }
 
-    @Test("Timeout throws error with short timeout")
-    func timeoutThrows() async throws {
-        let (clientTransport, _) = await InMemoryTransport.createConnectedPair()
-        try await clientTransport.connect()
+    @Test("Late response from timed-out request is dropped instead of poisoning next request")
+    func lateTimedOutResponseIsDropped() async throws {
+        let (queue, _, serverTransport) = try await makeQueue()
+        let slowResponse = try makeResponse(id: "slow", value: "slow")
+        let fastResponse = try makeResponse(id: "fast", value: "fast")
 
-        let queue = ResponseQueue()
-        await queue.start(transport: clientTransport)
+        await #expect(throws: BridgeError.self) {
+            _ = try await queue.waitForResponse(id: .string("slow"), timeoutMs: 20)
+        }
 
-        // 使用 1 秒超时，不发送任何数据
+        try await serverTransport.send(slowResponse)
+        async let fastWait = queue.waitForResponse(id: .string("fast"), timeoutMs: 1_000)
+        try await Task.sleep(for: .milliseconds(20))
+        try await serverTransport.send(fastResponse)
+
+        let received = try await fastWait
+        let metrics = await queue.getMetrics()
+
+        #expect(received == fastResponse)
+        #expect(metrics.buffered == 0)
+        #expect(metrics.dropped >= 1)
+
+        await queue.stop()
+    }
+
+    @Test("Timed-out request id cannot be reused within the same session")
+    func timedOutRequestIDCannotBeReused() async throws {
+        let (queue, _, _) = try await makeQueue()
+
+        await #expect(throws: BridgeError.self) {
+            _ = try await queue.waitForResponse(id: .string("stale"), timeoutMs: 20)
+        }
+
         do {
-            _ = try await queue.waitForNext(timeoutSeconds: 1)
-            Issue.record("Expected timeout error")
-        } catch {
-            // 预期行为：超时抛出错误
+            _ = try await queue.waitForResponse(id: .string("stale"), timeoutMs: 1_000)
+            Issue.record("Expected invalid request error for reused timed-out id")
+        } catch let error as BridgeError {
+            #expect(error.code == ErrorCodes.invalidRequest)
         }
 
         await queue.stop()
     }
 
-    @Test("Concurrent waiters each get distinct messages")
-    func concurrentWaiters() async throws {
-        let (clientTransport, serverTransport) = await InMemoryTransport.createConnectedPair()
-        try await clientTransport.connect()
-        try await serverTransport.connect()
+    @Test("Transport disconnection fails future waits immediately instead of timing out")
+    func disconnectedTransportFailsImmediately() async throws {
+        let (queue, _, serverTransport) = try await makeQueue()
+        let pendingWait = Task {
+            try await queue.waitForResponse(id: .string("first"), timeoutMs: 30_000)
+        }
 
-        let queue = ResponseQueue()
-        await queue.start(transport: clientTransport)
+        try await Task.sleep(for: .milliseconds(20))
+        await serverTransport.disconnect()
 
-        let msg1 = Data(#"{"id":"a"}"#.utf8)
-        let msg2 = Data(#"{"id":"b"}"#.utf8)
+        do {
+            _ = try await pendingWait.value
+            Issue.record("Expected pending waiter to fail when transport disconnects")
+        } catch let error as BridgeError {
+            #expect(error.code == ErrorCodes.internalError)
+        }
 
-        // 启动两个并发等待
-        async let wait1 = queue.waitForNext(timeoutSeconds: 5)
-        async let wait2 = queue.waitForNext(timeoutSeconds: 5)
-
-        // 短暂延迟后发送两条消息
-        try await Task.sleep(nanoseconds: 100_000_000)
-        try await serverTransport.send(msg1)
-        try await serverTransport.send(msg2)
-
-        let r1 = try await wait1
-        let r2 = try await wait2
-
-        // 两个 waiter 应该各收到一条不同的消息
-        let results = Set([r1, r2])
-        #expect(results.count == 2)
-        #expect(results.contains(msg1))
-        #expect(results.contains(msg2))
-
-        await queue.stop()
+        do {
+            _ = try await queue.waitForResponse(id: .string("second"), timeoutMs: 30_000)
+            Issue.record("Expected future wait to fail immediately after transport disconnect")
+        } catch let error as BridgeError {
+            #expect(error.code == ErrorCodes.internalError)
+        }
     }
 }

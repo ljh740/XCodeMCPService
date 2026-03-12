@@ -104,9 +104,6 @@ struct HTTPParser {
 
     /// 检测 JSON-RPC 消息是否为 notification（没有 "id" 字段）
     static func isJSONRPCNotification(_ data: Data) -> Bool {
-        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            return false
-        }
-        return json["id"] == nil
+        JSONRPCMessage.isNotification(data)
     }
 }

@@ -97,7 +97,8 @@ public actor BridgeServer {
         // 7. 创建 HTTPServer
         let httpServer = HTTPServer(
             port: config.bridge.port,
-            host: config.bridge.host
+            host: config.bridge.host,
+            responseTimeoutMs: config.bridge.timeout + HTTPServer.responseTimeoutGraceMs
         )
         self.httpServer = httpServer
 
