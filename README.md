@@ -13,7 +13,7 @@ MCP Client ──HTTP/POST──▶ XCodeMCPService ──stdio──▶ MCP Ser
 
 ## Features
 
-- **Multi-server aggregation** — Manage multiple MCP subprocesses, auto-aggregate Tools / Resources / Prompts with namespace prefixes (`serverName__toolName`) to avoid conflicts
+- **Multi-server aggregation** — Manage multiple MCP subprocesses and auto-aggregate downstream capabilities; tool names stay original in single-server mode and switch to namespace prefixes (`serverName__toolName`) only when multiple servers are configured
 - **Streamable HTTP Transport** — Lightweight HTTP server based on `NWListener`, providing `/mcp` endpoint, localhost only
 - **Session management** — Independent session per client with secure token identification
 - **Process lifecycle** — Crash detection + exponential backoff auto-restart

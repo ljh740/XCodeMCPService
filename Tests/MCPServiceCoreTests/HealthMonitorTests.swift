@@ -50,6 +50,7 @@ actor MockStdioClientManager: StdioClientManaging {
 
     // Active servers state
     private var activeServers: Set<String> = []
+    private var configuredServers: Set<String> = []
 
     // Client provisioning: map server name to a pre-created MCP Client (or nil)
     private var clients: [String: Client] = [:]
@@ -59,11 +60,17 @@ actor MockStdioClientManager: StdioClientManaging {
     }
 
     func addActiveServer(_ name: String) {
+        configuredServers.insert(name)
         activeServers.insert(name)
     }
 
     func setActiveServers(_ names: [String]) {
+        configuredServers.formUnion(names)
         activeServers = Set(names)
+    }
+
+    func setConfiguredServers(_ names: [String]) {
+        configuredServers = Set(names)
     }
 
     func setShouldFailStart(_ value: Bool) {
@@ -78,6 +85,7 @@ actor MockStdioClientManager: StdioClientManaging {
         if shouldFailStart {
             throw BridgeError.internalError("Mock start failure for '\(name)'")
         }
+        configuredServers.insert(name)
         activeServers.insert(name)
     }
 
@@ -93,6 +101,10 @@ actor MockStdioClientManager: StdioClientManaging {
 
     func getActiveServers() -> [String] {
         Array(activeServers)
+    }
+
+    func getConfiguredServerCount() -> Int {
+        configuredServers.count
     }
 
     func isServerRunning(name: String) -> Bool {

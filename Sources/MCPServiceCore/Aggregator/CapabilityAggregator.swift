@@ -3,10 +3,13 @@ import MCP
 
 // MARK: - Aggregated Types
 
-/// 聚合后的 Tool，带有服务器名称前缀
+/// 聚合后的 Tool。
+/// `name` 用于对外暴露，`canonicalName` 用于桥接层内部稳定路由。
 public struct AggregatedTool: Sendable {
-    /// 带前缀: serverName__originalName
+    /// 对外暴露的名称。单下游时保留原名，多下游时使用 `serverName__originalName`。
     public let name: String
+    /// 内部稳定路由键，始终使用 `serverName__originalName`。
+    public let canonicalName: String
     public let originalName: String
     public let serverName: String
     public let description: String?
@@ -38,13 +41,38 @@ public struct AggregatedPrompt: Sendable {
 public struct ResolvedName: Sendable {
     public let serverName: String
     public let originalName: String
+    public let canonicalName: String
+}
+
+enum ToolResolution: Sendable {
+    case resolved(ResolvedName)
+    case ambiguous(String)
+    case notFound
 }
 
 // MARK: - CapabilityAggregator
 
-/// 聚合多个下游 MCP 服务器的 capabilities（tools, resources, prompts），
-/// 为每个条目添加 `serverName__` 前缀避免名称冲突。
+/// 聚合多个下游 MCP 服务器的 capabilities（tools, resources, prompts）。
+/// Tool 在多下游场景下添加 `serverName__` 前缀避免冲突，单下游场景下对外暴露原始名称。
 public actor CapabilityAggregator {
+
+    private enum ToolNameExposureMode {
+        case original
+        case namespaced
+
+        static func from(configuredServerCount: Int) -> Self {
+            configuredServerCount == 1 ? .original : .namespaced
+        }
+
+        func publicName(originalName: String, canonicalName: String) -> String {
+            switch self {
+            case .original:
+                originalName
+            case .namespaced:
+                canonicalName
+            }
+        }
+    }
 
     // MARK: - Properties
 
@@ -79,11 +107,9 @@ public actor CapabilityAggregator {
         aggregatedPrompts
     }
 
-    /// 从带前缀的 tool 名称解析出服务器名和原始名
-    public func resolveToolServer(prefixedName: String) -> ResolvedName? {
-        guard let resolved = parsePrefix(prefixedName),
-            aggregatedTools.contains(where: { $0.name == prefixedName })
-        else {
+    /// 解析 tool 名称，兼容对外暴露名与内部 canonical name。
+    public func resolveToolServer(toolName: String) -> ResolvedName? {
+        guard case let .resolved(resolved) = resolveTool(toolName: toolName) else {
             return nil
         }
         return resolved
@@ -118,6 +144,7 @@ public actor CapabilityAggregator {
         aggregatedPrompts = []
 
         let activeServers = await clientManager.getActiveServers()
+        let toolNameMode = await currentToolNameExposureMode()
 
         guard !activeServers.isEmpty else {
             logger.info("No active servers to aggregate")
@@ -139,7 +166,10 @@ public actor CapabilityAggregator {
         ) { group in
             for serverName in activeServers {
                 group.addTask {
-                    await self.fetchServerCapabilities(serverName: serverName)
+                    await self.fetchServerCapabilities(
+                        serverName: serverName,
+                        toolNameMode: toolNameMode
+                    )
                 }
             }
 
@@ -170,39 +200,102 @@ public actor CapabilityAggregator {
 
     /// 获取单个服务器的 capabilities，任一类别失败则 warn 并跳过该类别
     private func fetchServerCapabilities(
-        serverName: String
+        serverName: String,
+        toolNameMode: ToolNameExposureMode
     ) async -> (tools: [AggregatedTool], resources: [AggregatedResource], prompts: [AggregatedPrompt])? {
         guard let client = await clientManager.getClient(name: serverName) else {
             logger.warning("Client not found for server '\(serverName)', skipping")
             return nil
         }
 
-        var tools: [AggregatedTool] = []
-        var resources: [AggregatedResource] = []
-        var prompts: [AggregatedPrompt] = []
+        let tools = await fetchAggregatedTools(
+            client: client,
+            serverName: serverName,
+            toolNameMode: toolNameMode
+        )
+        let resources = await fetchAggregatedResources(client: client, serverName: serverName)
+        let prompts = await fetchAggregatedPrompts(client: client, serverName: serverName)
+        return (tools: tools, resources: resources, prompts: prompts)
+    }
 
-        // Tools
+    func resolveTool(toolName: String) -> ToolResolution {
+        let publicMatches = aggregatedTools.filter { $0.name == toolName }
+        if publicMatches.count > 1 {
+            return .ambiguous("Tool name is ambiguous: \(toolName)")
+        }
+        if let tool = publicMatches.first {
+            let aliasMatches = aggregatedTools.filter {
+                $0.canonicalName == toolName && $0.name != toolName
+            }
+            if !aliasMatches.isEmpty {
+                logger.warning(
+                    "Legacy tool alias conflicts with a public tool name; public tool takes precedence",
+                    metadata: [
+                        "tool": toolName,
+                        "server": tool.serverName,
+                    ])
+            }
+            return .resolved(makeResolvedName(from: tool))
+        }
+
+        let legacyAliasMatches = aggregatedTools.filter {
+            $0.canonicalName == toolName && $0.name != toolName
+        }
+        if legacyAliasMatches.count > 1 {
+            return .ambiguous("Legacy tool alias is ambiguous: \(toolName)")
+        }
+        if let tool = legacyAliasMatches.first {
+            return .resolved(makeResolvedName(from: tool))
+        }
+        return .notFound
+    }
+
+    // MARK: - Private: Prefix
+
+    /// 为名称添加服务器前缀
+    private func addPrefix(_ serverName: String, _ name: String) -> String {
+        serverName + prefixSeparator + name
+    }
+
+    private func makeResolvedName(from tool: AggregatedTool) -> ResolvedName {
+        ResolvedName(
+            serverName: tool.serverName,
+            originalName: tool.originalName,
+            canonicalName: tool.canonicalName
+        )
+    }
+
+    private func currentToolNameExposureMode() async -> ToolNameExposureMode {
+        let configuredServerCount = await clientManager.getConfiguredServerCount()
+        return ToolNameExposureMode.from(configuredServerCount: configuredServerCount)
+    }
+
+    private func fetchAggregatedTools(
+        client: Client,
+        serverName: String,
+        toolNameMode: ToolNameExposureMode
+    ) async -> [AggregatedTool] {
         do {
             let result = try await client.listTools()
-            tools = result.tools.map { tool in
-                AggregatedTool(
-                    name: addPrefix(serverName, tool.name),
-                    originalName: tool.name,
+            return result.tools.map { tool in
+                makeAggregatedTool(
                     serverName: serverName,
-                    description: tool.description,
-                    inputSchema: tool.inputSchema
+                    tool: tool,
+                    toolNameMode: toolNameMode
                 )
             }
         } catch {
             logger.warning("Failed to list tools from '\(serverName)'", metadata: [
                 "error": "\(error)"
             ])
+            return []
         }
+    }
 
-        // Resources
+    private func fetchAggregatedResources(client: Client, serverName: String) async -> [AggregatedResource] {
         do {
             let result = try await client.listResources()
-            resources = result.resources.map { resource in
+            return result.resources.map { resource in
                 AggregatedResource(
                     uri: addPrefix(serverName, resource.uri),
                     originalUri: resource.uri,
@@ -216,12 +309,14 @@ public actor CapabilityAggregator {
             logger.warning("Failed to list resources from '\(serverName)'", metadata: [
                 "error": "\(error)"
             ])
+            return []
         }
+    }
 
-        // Prompts
+    private func fetchAggregatedPrompts(client: Client, serverName: String) async -> [AggregatedPrompt] {
         do {
             let result = try await client.listPrompts()
-            prompts = result.prompts.map { prompt in
+            return result.prompts.map { prompt in
                 AggregatedPrompt(
                     name: addPrefix(serverName, prompt.name),
                     originalName: prompt.name,
@@ -234,16 +329,29 @@ public actor CapabilityAggregator {
             logger.warning("Failed to list prompts from '\(serverName)'", metadata: [
                 "error": "\(error)"
             ])
+            return []
         }
-
-        return (tools: tools, resources: resources, prompts: prompts)
     }
 
-    // MARK: - Private: Prefix
-
-    /// 为名称添加服务器前缀
-    private func addPrefix(_ serverName: String, _ name: String) -> String {
-        serverName + prefixSeparator + name
+    /// 构造 tool 的对外名称和内部 canonical 名称。
+    private func makeAggregatedTool(
+        serverName: String,
+        tool: Tool,
+        toolNameMode: ToolNameExposureMode
+    ) -> AggregatedTool {
+        let canonicalName = addPrefix(serverName, tool.name)
+        let publicName = toolNameMode.publicName(
+            originalName: tool.name,
+            canonicalName: canonicalName
+        )
+        return AggregatedTool(
+            name: publicName,
+            canonicalName: canonicalName,
+            originalName: tool.name,
+            serverName: serverName,
+            description: tool.description,
+            inputSchema: tool.inputSchema
+        )
     }
 
     /// 从带前缀的名称中解析出服务器名和原始名
@@ -258,6 +366,10 @@ public actor CapabilityAggregator {
             return nil
         }
 
-        return ResolvedName(serverName: serverName, originalName: originalName)
+        return ResolvedName(
+            serverName: serverName,
+            originalName: originalName,
+            canonicalName: prefixedName
+        )
     }
 }

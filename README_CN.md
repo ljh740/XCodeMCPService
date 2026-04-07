@@ -13,7 +13,7 @@ MCP Client ──HTTP/POST──▶ XCodeMCPService ──stdio──▶ MCP Ser
 
 ## 功能特性
 
-- **多服务器聚合** — 同时管理多个 MCP 子进程，自动聚合 Tools / Resources / Prompts，通过命名空间前缀（`serverName__toolName`）避免冲突
+- **多服务器聚合** — 同时管理多个 MCP 子进程并自动聚合下游 capabilities；单下游时对外暴露原始 tool 名，多下游时才切换为命名空间前缀（`serverName__toolName`）避免冲突
 - **Streamable HTTP Transport** — 基于 `NWListener` 的轻量 HTTP 服务器，提供 `/mcp` endpoint，仅监听 localhost
 - **会话管理** — 每个客户端独立会话，安全 token 标识
 - **进程生命周期** — 崩溃检测 + 指数退避自动重启

@@ -10,6 +10,7 @@ public protocol StdioClientManaging: Actor, Sendable {
     func stopServer(name: String) async
     func getClient(name: String) -> Client?
     func getActiveServers() -> [String]
+    func getConfiguredServerCount() -> Int
     func isServerRunning(name: String) -> Bool
 }
 
@@ -317,6 +318,11 @@ public actor StdioClientManager: StdioClientManaging {
     /// 获取所有运行中的服务器名称
     public func getActiveServers() -> [String] {
         Array(servers.keys)
+    }
+
+    /// 获取已配置且启用的服务器数量，用于稳定决定对外工具命名策略。
+    public func getConfiguredServerCount() -> Int {
+        serverConfigs.count
     }
 
     /// 检查指定服务器是否正在运行

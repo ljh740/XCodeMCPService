@@ -252,7 +252,7 @@ public actor BridgeServer {
         // CallTool
         await server.withMethodHandler(CallTool.self) { params in
             let result = await router.routeToolCall(
-                prefixedName: params.name,
+                toolName: params.name,
                 args: params.arguments
             )
             guard result.success, let data = result.data else {

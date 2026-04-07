@@ -61,15 +61,25 @@ public actor RequestRouter {
 
     /// 路由 tool 调用到对应的下游服务器
     public func routeToolCall(
-        prefixedName: String,
+        toolName: String,
         args: [String: Value]?
     ) async -> RouteResult<ToolCallResult> {
-        // 解析前缀 → 服务器名 + 原始名
-        guard let resolved = await aggregator.resolveToolServer(prefixedName: prefixedName) else {
-            logger.warning("Tool not found: \(prefixedName)")
+        let resolution = await aggregator.resolveTool(toolName: toolName)
+        let resolved: ResolvedName
+        switch resolution {
+        case .resolved(let value):
+            resolved = value
+        case .ambiguous(let message):
+            logger.warning(message)
+            return .failure(
+                code: ErrorCodes.invalidParams,
+                message: message
+            )
+        case .notFound:
+            logger.warning("Tool not found: \(toolName)")
             return .failure(
                 code: ErrorCodes.methodNotFound,
-                message: "Tool not found: \(prefixedName)"
+                message: "Tool not found: \(toolName)"
             )
         }
 
@@ -81,37 +91,37 @@ public actor RequestRouter {
             )
         }
         let requestGeneration = await currentHealthGeneration(serverName: resolved.serverName)
+        let logName = resolved.canonicalName
+        let metadata = toolLogMetadata(
+            canonicalName: logName,
+            requestedName: toolName,
+            serverName: resolved.serverName
+        )
 
         // 带超时调用
         do {
             let result = try await withTimeout(timeout) {
                 try await client.callTool(name: resolved.originalName, arguments: args)
             }
-            logger.debug("Tool call succeeded", metadata: [
-                "tool": prefixedName,
-                "server": resolved.serverName,
-            ])
+            logger.debug("Tool call succeeded", metadata: metadata)
             return .success(ToolCallResult(content: result.content, isError: result.isError))
         } catch is TimeoutError {
-            logger.error("Tool call timed out", metadata: [
-                "tool": prefixedName,
-                "server": resolved.serverName,
-                "timeoutMs": "\(timeout)",
-            ])
+            var timeoutMetadata = metadata
+            timeoutMetadata["timeoutMs"] = "\(timeout)"
+            logger.error("Tool call timed out", metadata: timeoutMetadata)
             reportTimeout(
                 serverName: resolved.serverName,
-                operation: "tool:\(prefixedName)",
+                operation: "tool:\(logName)",
                 generation: requestGeneration
             )
             return .failure(
                 code: ErrorCodes.timeout,
-                message: "Tool call timed out after \(timeout)ms: \(prefixedName)"
+                message: "Tool call timed out after \(timeout)ms: \(toolName)"
             )
         } catch {
-            logger.error("Tool call failed", metadata: [
-                "tool": prefixedName,
-                "error": "\(error)",
-            ])
+            var failureMetadata = metadata
+            failureMetadata["error"] = "\(error)"
+            logger.error("Tool call failed", metadata: failureMetadata)
             return .failure(
                 code: ErrorCodes.bridgeError,
                 message: "Tool call failed: \(error)"
@@ -266,6 +276,21 @@ public actor RequestRouter {
                 generation: generation
             )
         }
+    }
+
+    private func toolLogMetadata(
+        canonicalName: String,
+        requestedName: String,
+        serverName: String
+    ) -> [String: String] {
+        var metadata = [
+            "tool": canonicalName,
+            "server": serverName,
+        ]
+        if requestedName != canonicalName {
+            metadata["requestedTool"] = requestedName
+        }
+        return metadata
     }
 
     // MARK: - Private: Timeout
