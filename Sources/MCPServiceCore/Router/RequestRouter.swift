@@ -192,7 +192,7 @@ public actor RequestRouter {
     /// 路由 prompt 获取到对应的下游服务器
     public func routePromptGet(
         prefixedName: String,
-        args: [String: Value]?
+        args: [String: String]?
     ) async -> RouteResult<PromptGetResult> {
         guard let resolved = await aggregator.resolvePromptServer(prefixedName: prefixedName) else {
             logger.warning("Prompt not found: \(prefixedName)")

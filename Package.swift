@@ -13,7 +13,7 @@ let package = Package(
         .executable(name: "XCodeMCPStatusBar", targets: ["XCodeMCPStatusBar"])
     ],
     dependencies: [
-        .package(url: "https://github.com/modelcontextprotocol/swift-sdk", from: "0.10.0"),
+        .package(url: "https://github.com/modelcontextprotocol/swift-sdk", from: "0.12.0"),
         .package(url: "https://github.com/apple/swift-argument-parser", from: "1.3.0"),
         .package(url: "https://github.com/apple/swift-log", from: "1.9.0")
     ],
