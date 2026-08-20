@@ -8,6 +8,9 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$SCRIPT_DIR"
 OUTPUT_DIR="$PROJECT_DIR/build"
 BUILD_CONFIGURATION="${BUILD_CONFIGURATION:-release}"
+CODE_SIGN_IDENTITY="${CODE_SIGN_IDENTITY:--}"
+CODE_SIGN_RUNTIME="${CODE_SIGN_RUNTIME:-1}"
+CODE_SIGN_TIMESTAMP="${CODE_SIGN_TIMESTAMP:-auto}"
 
 APP_NAME="XCode MCP Service"
 APP_BUNDLE="$OUTPUT_DIR/${APP_NAME}.app"
@@ -18,6 +21,50 @@ APP_ARCHIVE_CHECKSUM="${APP_ARCHIVE}.sha256"
 DMG_STAGING_DIR="$OUTPUT_DIR/dmg-root"
 EXECUTABLE="XCodeMCPStatusBar"
 CLI_EXECUTABLE="XCodeMCPService"
+STATUS_BAR_IDENTIFIER="com.ljh740.XCodeMCPStatusBar"
+CLI_IDENTIFIER="com.ljh740.XCodeMCPService"
+ENTITLEMENTS_PATH="$PROJECT_DIR/Sources/XCodeMCPStatusBar/XCodeMCPService.entitlements"
+
+sign_path() {
+    local target_path="$1"
+    local identifier="$2"
+    local entitlements_path="${3:-}"
+    local -a sign_args=(
+        --force
+        --sign "$CODE_SIGN_IDENTITY"
+        --identifier "$identifier"
+    )
+
+    if [ -n "$entitlements_path" ]; then
+        sign_args+=(--entitlements "$entitlements_path")
+    fi
+
+    if [ "$CODE_SIGN_RUNTIME" = "1" ]; then
+        sign_args+=(--options runtime)
+    fi
+
+    case "$CODE_SIGN_TIMESTAMP" in
+        auto)
+            if [ "$CODE_SIGN_IDENTITY" = "-" ]; then
+                sign_args+=(--timestamp=none)
+            else
+                sign_args+=(--timestamp)
+            fi
+            ;;
+        secure)
+            sign_args+=(--timestamp)
+            ;;
+        none)
+            sign_args+=(--timestamp=none)
+            ;;
+        *)
+            echo "Error: CODE_SIGN_TIMESTAMP must be auto, secure, or none" >&2
+            exit 1
+            ;;
+    esac
+
+    codesign "${sign_args[@]}" "$target_path"
+}
 
 echo "=== Building XCodeMCPService ==="
 
@@ -54,12 +101,25 @@ echo "Copied resource bundle for localization"
 # 7. 创建 PkgInfo
 echo -n "APPL????" > "$APP_BUNDLE/Contents/PkgInfo"
 
-# 8. 打包 zip 并生成校验文件
+# 8. 先签内层可执行文件，再签整个 App bundle；未指定 identity 时使用 ad-hoc 签名
+echo "=== Signing ${APP_NAME}.app ==="
+if [ "$CODE_SIGN_IDENTITY" = "-" ]; then
+    echo "Using ad-hoc signing; Xcode may still grant only temporary agent trust"
+else
+    echo "Using code signing identity: $CODE_SIGN_IDENTITY"
+fi
+sign_path "$APP_BUNDLE/Contents/MacOS/$CLI_EXECUTABLE" "$CLI_IDENTIFIER" "$ENTITLEMENTS_PATH"
+sign_path "$APP_BUNDLE/Contents/MacOS/$EXECUTABLE" "$STATUS_BAR_IDENTIFIER" "$ENTITLEMENTS_PATH"
+sign_path "$APP_BUNDLE" "$STATUS_BAR_IDENTIFIER" "$ENTITLEMENTS_PATH"
+codesign --verify --deep --strict --verbose=2 "$APP_BUNDLE"
+echo "Code signing verification passed"
+
+# 9. 打包 zip 并生成校验文件
 rm -f "$APP_DMG" "$APP_DMG_CHECKSUM" "$APP_ARCHIVE" "$APP_ARCHIVE_CHECKSUM"
 ditto -c -k --sequesterRsrc --keepParent "$APP_BUNDLE" "$APP_ARCHIVE"
 shasum -a 256 "$APP_ARCHIVE" > "$APP_ARCHIVE_CHECKSUM"
 
-# 9. 打包 dmg 并生成校验文件
+# 10. 打包 dmg 并生成校验文件
 rm -rf "$DMG_STAGING_DIR"
 mkdir -p "$DMG_STAGING_DIR"
 ditto "$APP_BUNDLE" "$DMG_STAGING_DIR/${APP_NAME}.app"

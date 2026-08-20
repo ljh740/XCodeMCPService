@@ -31,6 +31,8 @@
     <true/>
     <key>NSHighResolutionCapable</key>
     <true/>
+    <key>NSAppleEventsUsageDescription</key>
+    <string>XCode MCP Service uses Xcode automation to connect MCP tools to the selected Xcode installation.</string>
     <key>CFBundleIconFile</key>
     <string>AppIcon</string>
     <key>NSSupportsAutomaticTermination</key>

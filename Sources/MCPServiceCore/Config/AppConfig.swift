@@ -74,6 +74,8 @@ public struct BridgeConfig: Codable, Sendable, Hashable {
     public var host: String
     /// 请求超时（毫秒）
     public var timeout: Int
+    /// 启动和重连时获取下游 capabilities 的单次请求超时（毫秒）
+    public var capabilityTimeout: Int
     /// 日志级别
     public var logLevel: LogLevel
 
@@ -81,16 +83,18 @@ public struct BridgeConfig: Codable, Sendable, Hashable {
         port: Int = 13339,
         host: String = "127.0.0.1",
         timeout: Int = 30000,
+        capabilityTimeout: Int = 15000,
         logLevel: LogLevel = .info
     ) {
         self.port = port
         self.host = host
         self.timeout = timeout
+        self.capabilityTimeout = capabilityTimeout
         self.logLevel = logLevel
     }
 
     private enum CodingKeys: String, CodingKey {
-        case port, host, timeout, logLevel
+        case port, host, timeout, capabilityTimeout, logLevel
     }
 
     public init(from decoder: Decoder) throws {
@@ -98,6 +102,7 @@ public struct BridgeConfig: Codable, Sendable, Hashable {
         port = try container.decodeIfPresent(Int.self, forKey: .port) ?? 13339
         host = try container.decodeIfPresent(String.self, forKey: .host) ?? "127.0.0.1"
         timeout = try container.decodeIfPresent(Int.self, forKey: .timeout) ?? 30000
+        capabilityTimeout = try container.decodeIfPresent(Int.self, forKey: .capabilityTimeout) ?? 15000
         logLevel = try container.decodeIfPresent(LogLevel.self, forKey: .logLevel) ?? .info
     }
 }
@@ -117,6 +122,7 @@ public struct AppConfig: Codable, Sendable, Hashable {
             port: 13339,
             host: "127.0.0.1",
             timeout: 30000,
+            capabilityTimeout: 15000,
             logLevel: .info
         ),
         servers: [
@@ -168,6 +174,12 @@ public struct AppConfig: Codable, Sendable, Hashable {
 
         guard bridge.timeout >= 1000 else {
             throw ConfigValidationError("bridge.timeout must be at least 1000ms, got \(bridge.timeout)")
+        }
+
+        guard bridge.capabilityTimeout >= 1000 else {
+            throw ConfigValidationError(
+                "bridge.capabilityTimeout must be at least 1000ms, got \(bridge.capabilityTimeout)"
+            )
         }
 
         // 只允许 localhost 访问

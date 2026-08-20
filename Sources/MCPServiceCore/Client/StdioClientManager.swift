@@ -35,17 +35,22 @@ public actor StdioClientManager: StdioClientManaging {
     private var serverConfigs: [String: ServerConfig]
     private var servers: [String: ServerInfo] = [:]
     private var onServerExit: (@Sendable (String) -> Void)?
+    private let launchResolver: any ServerLaunchResolving
 
     private let logger = bridgeLogger.child(label: "client-manager")
 
     // MARK: - Init
 
-    public init(configs: [ServerConfig]) {
+    public init(
+        configs: [ServerConfig],
+        launchResolver: any ServerLaunchResolving = DefaultServerLaunchResolver()
+    ) {
         var map: [String: ServerConfig] = [:]
         for config in configs {
             map[config.name] = config
         }
         self.serverConfigs = map
+        self.launchResolver = launchResolver
     }
 
     public func setServerExitHandler(_ handler: (@Sendable (String) -> Void)?) {
@@ -66,10 +71,6 @@ public actor StdioClientManager: StdioClientManaging {
             await stopServer(name: name)
         }
 
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-        process.arguments = [config.command] + config.args
-
         // 合并当前进程环境变量与配置的环境变量
         var environment = ProcessInfo.processInfo.environment
         if let env = config.env {
@@ -77,7 +78,17 @@ public actor StdioClientManager: StdioClientManaging {
                 environment[key] = value
             }
         }
-        process.environment = environment
+
+        // 每次启动（包括重连）都重新解析运行环境，确保 mcpbridge 与当前 Xcode 匹配。
+        let resolvedLaunch = try await launchResolver.resolve(
+            config: config,
+            environment: environment
+        )
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        process.arguments = [resolvedLaunch.command] + resolvedLaunch.args
+        process.environment = resolvedLaunch.environment
 
         let stdinPipe = Pipe()
         let stdoutPipe = Pipe()
@@ -108,10 +119,10 @@ public actor StdioClientManager: StdioClientManaging {
             throw BridgeError.internalError("Failed to start server '\(name)': \(error)")
         }
 
-        logger.info("Server '\(name)' process started", metadata: [
-            "pid": "\(process.processIdentifier)",
-            "command": config.command,
-        ])
+        var launchMetadata = resolvedLaunch.metadata
+        launchMetadata["pid"] = "\(process.processIdentifier)"
+        launchMetadata["command"] = resolvedLaunch.command
+        logger.info("Server '\(name)' process started", metadata: launchMetadata)
 
         // PipeTransport: 从子进程 stdout 读取，写入子进程 stdin
         let transport = PipeTransport(

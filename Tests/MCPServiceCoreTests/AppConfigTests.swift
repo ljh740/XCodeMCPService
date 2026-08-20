@@ -40,18 +40,20 @@ struct AppConfigTests {
         #expect(config.port == 13339)
         #expect(config.host == "127.0.0.1")
         #expect(config.timeout == 30000)
+        #expect(config.capabilityTimeout == 15000)
         #expect(config.logLevel == .info)
     }
 
     @Test("BridgeConfig JSON decoding with custom values")
     func bridgeConfigCustom() throws {
         let json = """
-        {"port":8080,"host":"127.0.0.1","timeout":60000,"logLevel":"debug"}
+        {"port":8080,"host":"127.0.0.1","timeout":60000,"capabilityTimeout":7000,"logLevel":"debug"}
         """
         let config = try JSONDecoder().decode(BridgeConfig.self, from: Data(json.utf8))
         #expect(config.port == 8080)
         #expect(config.host == "127.0.0.1")
         #expect(config.timeout == 60000)
+        #expect(config.capabilityTimeout == 7000)
         #expect(config.logLevel == .debug)
     }
 
@@ -121,12 +123,29 @@ struct AppConfigTests {
         }
     }
 
+    @Test("validate throws on capability timeout below 1000ms")
+    func validateLowCapabilityTimeout() {
+        let config = AppConfig(
+            bridge: BridgeConfig(capabilityTimeout: 500),
+            servers: [ServerConfig(name: "s1", command: "node")]
+        )
+        #expect(throws: ConfigValidationError.self) {
+            try config.validate()
+        }
+    }
+
     // MARK: - Round-trip Encoding
 
     @Test("Encode then decode preserves values")
     func roundTrip() throws {
         let original = AppConfig(
-            bridge: BridgeConfig(port: 9090, host: "127.0.0.1", timeout: 5000, logLevel: .debug),
+            bridge: BridgeConfig(
+                port: 9090,
+                host: "127.0.0.1",
+                timeout: 5000,
+                capabilityTimeout: 4000,
+                logLevel: .debug
+            ),
             servers: [
                 ServerConfig(name: "a", command: "xcrun", args: ["--flag"], env: ["K": "V"], enabled: false),
                 ServerConfig(name: "b", command: "xcrun"),

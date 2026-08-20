@@ -50,6 +50,37 @@ enum ToolResolution: Sendable {
     case notFound
 }
 
+/// 一次 capability 聚合的结果，用于区分“空能力”与“所有请求均失败”。
+public struct CapabilityRefreshSummary: Sendable, Equatable {
+    public let activeServerCount: Int
+    public let successfulFetchCount: Int
+    public let successfulServers: Set<String>
+    public let toolCount: Int
+    public let resourceCount: Int
+    public let promptCount: Int
+    public let failures: [String: String]
+
+    public var hasSuccessfulFetch: Bool { successfulFetchCount > 0 }
+
+    public func hasSuccessfulFetch(for serverName: String) -> Bool {
+        successfulServers.contains(serverName)
+    }
+}
+
+private enum CapabilityFetchResult<Value: Sendable>: Sendable {
+    case success(Value)
+    case failure(String)
+}
+
+private struct ServerCapabilityResult: Sendable {
+    let serverName: String
+    let tools: [AggregatedTool]
+    let resources: [AggregatedResource]
+    let prompts: [AggregatedPrompt]
+    let successfulFetchCount: Int
+    let failures: [String: String]
+}
+
 // MARK: - CapabilityAggregator
 
 /// 聚合多个下游 MCP 服务器的 capabilities（tools, resources, prompts）。
@@ -81,13 +112,18 @@ public actor CapabilityAggregator {
     private var aggregatedResources: [AggregatedResource] = []
     private var aggregatedPrompts: [AggregatedPrompt] = []
     private let clientManager: any StdioClientManaging
+    private let capabilityRequestTimeoutMs: Int
 
     private let logger = bridgeLogger.child(label: "capability-aggregator")
 
     // MARK: - Init
 
-    public init(clientManager: any StdioClientManaging) {
+    public init(
+        clientManager: any StdioClientManaging,
+        capabilityRequestTimeoutMs: Int = 15000
+    ) {
         self.clientManager = clientManager
+        self.capabilityRequestTimeoutMs = max(capabilityRequestTimeoutMs, 1)
     }
 
     // MARK: - Public Query
@@ -138,7 +174,8 @@ public actor CapabilityAggregator {
     // MARK: - Refresh
 
     /// 并发获取所有活跃服务器的 capabilities，跳过失败的服务器
-    public func refresh() async {
+    @discardableResult
+    public func refresh() async -> CapabilityRefreshSummary {
         aggregatedTools = []
         aggregatedResources = []
         aggregatedPrompts = []
@@ -148,21 +185,22 @@ public actor CapabilityAggregator {
 
         guard !activeServers.isEmpty else {
             logger.info("No active servers to aggregate")
-            return
+            return CapabilityRefreshSummary(
+                activeServerCount: 0,
+                successfulFetchCount: 0,
+                successfulServers: [],
+                toolCount: 0,
+                resourceCount: 0,
+                promptCount: 0,
+                failures: [:]
+            )
         }
 
         logger.info("Refreshing capabilities from \(activeServers.count) server(s)")
 
-        // 每个 server 返回的 capabilities
-        typealias ServerResult = (
-            tools: [AggregatedTool],
-            resources: [AggregatedResource],
-            prompts: [AggregatedPrompt]
-        )
-
         let results = await withTaskGroup(
-            of: ServerResult?.self,
-            returning: [ServerResult].self
+            of: ServerCapabilityResult.self,
+            returning: [ServerCapabilityResult].self
         ) { group in
             for serverName in activeServers {
                 group.addTask {
@@ -173,27 +211,45 @@ public actor CapabilityAggregator {
                 }
             }
 
-            var collected: [ServerResult] = []
+            var collected: [ServerCapabilityResult] = []
             for await result in group {
-                if let result {
-                    collected.append(result)
-                }
+                collected.append(result)
             }
             return collected
         }
 
         // 合并所有结果
+        var successfulFetchCount = 0
+        var successfulServers: Set<String> = []
+        var failures: [String: String] = [:]
         for result in results {
             aggregatedTools.append(contentsOf: result.tools)
             aggregatedResources.append(contentsOf: result.resources)
             aggregatedPrompts.append(contentsOf: result.prompts)
+            successfulFetchCount += result.successfulFetchCount
+            if result.successfulFetchCount > 0 {
+                successfulServers.insert(result.serverName)
+            }
+            failures.merge(result.failures, uniquingKeysWith: { _, latest in latest })
         }
 
         logger.info("Aggregated capabilities", metadata: [
             "tools": "\(aggregatedTools.count)",
             "resources": "\(aggregatedResources.count)",
             "prompts": "\(aggregatedPrompts.count)",
+            "successfulFetches": "\(successfulFetchCount)",
+            "failures": "\(failures.count)",
         ])
+
+        return CapabilityRefreshSummary(
+            activeServerCount: activeServers.count,
+            successfulFetchCount: successfulFetchCount,
+            successfulServers: successfulServers,
+            toolCount: aggregatedTools.count,
+            resourceCount: aggregatedResources.count,
+            promptCount: aggregatedPrompts.count,
+            failures: failures
+        )
     }
 
     // MARK: - Private: Fetch
@@ -202,20 +258,71 @@ public actor CapabilityAggregator {
     private func fetchServerCapabilities(
         serverName: String,
         toolNameMode: ToolNameExposureMode
-    ) async -> (tools: [AggregatedTool], resources: [AggregatedResource], prompts: [AggregatedPrompt])? {
+    ) async -> ServerCapabilityResult {
         guard let client = await clientManager.getClient(name: serverName) else {
             logger.warning("Client not found for server '\(serverName)', skipping")
-            return nil
+            return ServerCapabilityResult(
+                serverName: serverName,
+                tools: [],
+                resources: [],
+                prompts: [],
+                successfulFetchCount: 0,
+                failures: ["\(serverName)/client": "Client not found"]
+            )
         }
 
-        let tools = await fetchAggregatedTools(
+        async let toolsResult = fetchAggregatedTools(
             client: client,
             serverName: serverName,
             toolNameMode: toolNameMode
         )
-        let resources = await fetchAggregatedResources(client: client, serverName: serverName)
-        let prompts = await fetchAggregatedPrompts(client: client, serverName: serverName)
-        return (tools: tools, resources: resources, prompts: prompts)
+        async let resourcesResult = fetchAggregatedResources(client: client, serverName: serverName)
+        async let promptsResult = fetchAggregatedPrompts(client: client, serverName: serverName)
+
+        let (resolvedTools, resolvedResources, resolvedPrompts) = await (
+            toolsResult,
+            resourcesResult,
+            promptsResult
+        )
+
+        var tools: [AggregatedTool] = []
+        var resources: [AggregatedResource] = []
+        var prompts: [AggregatedPrompt] = []
+        var successfulFetchCount = 0
+        var failures: [String: String] = [:]
+
+        switch resolvedTools {
+        case .success(let value):
+            tools = value
+            successfulFetchCount += 1
+        case .failure(let message):
+            failures["\(serverName)/tools"] = message
+        }
+
+        switch resolvedResources {
+        case .success(let value):
+            resources = value
+            successfulFetchCount += 1
+        case .failure(let message):
+            failures["\(serverName)/resources"] = message
+        }
+
+        switch resolvedPrompts {
+        case .success(let value):
+            prompts = value
+            successfulFetchCount += 1
+        case .failure(let message):
+            failures["\(serverName)/prompts"] = message
+        }
+
+        return ServerCapabilityResult(
+            serverName: serverName,
+            tools: tools,
+            resources: resources,
+            prompts: prompts,
+            successfulFetchCount: successfulFetchCount,
+            failures: failures
+        )
     }
 
     func resolveTool(toolName: String) -> ToolResolution {
@@ -274,28 +381,36 @@ public actor CapabilityAggregator {
         client: Client,
         serverName: String,
         toolNameMode: ToolNameExposureMode
-    ) async -> [AggregatedTool] {
+    ) async -> CapabilityFetchResult<[AggregatedTool]> {
         do {
-            let result = try await client.listTools()
-            return result.tools.map { tool in
+            let result = try await asyncWithTimeout(capabilityRequestTimeoutMs) {
+                try await client.listTools()
+            }
+            return .success(result.tools.map { tool in
                 makeAggregatedTool(
                     serverName: serverName,
                     tool: tool,
                     toolNameMode: toolNameMode
                 )
-            }
+            })
         } catch {
+            let message = capabilityFailureMessage(error)
             logger.warning("Failed to list tools from '\(serverName)'", metadata: [
-                "error": "\(error)"
+                "error": message
             ])
-            return []
+            return .failure(message)
         }
     }
 
-    private func fetchAggregatedResources(client: Client, serverName: String) async -> [AggregatedResource] {
+    private func fetchAggregatedResources(
+        client: Client,
+        serverName: String
+    ) async -> CapabilityFetchResult<[AggregatedResource]> {
         do {
-            let result = try await client.listResources()
-            return result.resources.map { resource in
+            let result = try await asyncWithTimeout(capabilityRequestTimeoutMs) {
+                try await client.listResources()
+            }
+            return .success(result.resources.map { resource in
                 AggregatedResource(
                     uri: addPrefix(serverName, resource.uri),
                     originalUri: resource.uri,
@@ -304,19 +419,25 @@ public actor CapabilityAggregator {
                     description: resource.description,
                     mimeType: resource.mimeType
                 )
-            }
+            })
         } catch {
+            let message = capabilityFailureMessage(error)
             logger.warning("Failed to list resources from '\(serverName)'", metadata: [
-                "error": "\(error)"
+                "error": message
             ])
-            return []
+            return .failure(message)
         }
     }
 
-    private func fetchAggregatedPrompts(client: Client, serverName: String) async -> [AggregatedPrompt] {
+    private func fetchAggregatedPrompts(
+        client: Client,
+        serverName: String
+    ) async -> CapabilityFetchResult<[AggregatedPrompt]> {
         do {
-            let result = try await client.listPrompts()
-            return result.prompts.map { prompt in
+            let result = try await asyncWithTimeout(capabilityRequestTimeoutMs) {
+                try await client.listPrompts()
+            }
+            return .success(result.prompts.map { prompt in
                 AggregatedPrompt(
                     name: addPrefix(serverName, prompt.name),
                     originalName: prompt.name,
@@ -324,13 +445,21 @@ public actor CapabilityAggregator {
                     description: prompt.description,
                     arguments: prompt.arguments
                 )
-            }
+            })
         } catch {
+            let message = capabilityFailureMessage(error)
             logger.warning("Failed to list prompts from '\(serverName)'", metadata: [
-                "error": "\(error)"
+                "error": message
             ])
-            return []
+            return .failure(message)
         }
+    }
+
+    private func capabilityFailureMessage(_ error: any Error) -> String {
+        if error is AsyncTimeoutError {
+            return "Timed out after \(capabilityRequestTimeoutMs)ms"
+        }
+        return String(describing: error)
     }
 
     /// 构造 tool 的对外名称和内部 canonical 名称。

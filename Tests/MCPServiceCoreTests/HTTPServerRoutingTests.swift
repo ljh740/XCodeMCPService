@@ -1,9 +1,20 @@
 import Foundation
+import Network
 import Testing
 @testable import MCPServiceCore
 
 @Suite("HTTP Routing Tests")
 struct HTTPServerRoutingTests {
+    @Test("Listener parameters bind to IPv4 loopback before listener creation")
+    func listenerParametersBindToLoopback() {
+        let parameters = HTTPServer.makeListenerParameters(host: "localhost", port: 13339)
+
+        #expect(parameters.requiredLocalEndpoint == .hostPort(
+            host: "127.0.0.1",
+            port: 13339
+        ))
+    }
+
 
     // MARK: - JSON-RPC Notification Detection
 

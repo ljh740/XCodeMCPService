@@ -2,14 +2,45 @@
 
 [English](README.md)
 
-MCP Forward Bridge — 让 `xcrun mcpbridge` 常驻后台，通过 Streamable HTTP 转发 MCP 请求。
+本地 MCP Gateway — 将 `xcrun mcpbridge` 和其他 stdio MCP Server 聚合为一个稳定的 Streamable HTTP endpoint。
 
-每次 MCP 客户端连接都会启动新的 `xcrun mcpbridge` 进程，触发 Xcode 授权弹窗。本项目通过常驻一个 [`xcrun mcpbridge`](https://developer.apple.com/documentation/xcode/giving-agentic-coding-tools-access-to-xcode) 进程并聚合转发请求，避免重复授权。
+Xcode 27+ 已原生提供 headless MCP 和持久授权。只连接一个 Xcode、且客户端支持 stdio 时，应优先直接运行 [`xcrun mcpbridge`](https://developer.apple.com/documentation/xcode/giving-agentic-coding-tools-access-to-xcode)，无需安装本项目。本项目适用于需要 HTTP transport、多 MCP Server 聚合、统一进程治理或旧版 Xcode 兼容的场景。
 
 ```
 MCP Client ──HTTP/POST──▶ XCodeMCPService ──stdio──▶ MCP Server (xcrun mcpbridge)
            ◀──JSON-RPC───                  ◀──pipe──
 ```
+
+## 是否需要本项目
+
+| 场景 | 推荐方式 |
+|------|----------|
+| Xcode 27+、单个本地 Agent、客户端支持 stdio | 直接配置 `xcrun mcpbridge` |
+| 客户端只支持 HTTP，或多个客户端需要稳定的 localhost endpoint | 使用 XCodeMCPService |
+| 需要聚合多个 MCP Server、统一超时、重启和日志 | 使用 XCodeMCPService |
+| Xcode 26.3+，需要绑定运行中的 Xcode | 使用 XCodeMCPService 的兼容模式 |
+
+Xcode 27+ 原生直连示例：
+
+```json
+{
+  "mcpServers": {
+    "xcode-tools": {
+      "command": "xcrun",
+      "args": ["mcpbridge"]
+    }
+  }
+}
+```
+
+首次使用 headless MCP 时，按当前 `xcode-select` 指向的 Xcode 启用一次：
+
+```bash
+sudo xcrun mcp-server enable
+xcrun mcp-server status
+```
+
+> 本项目不会自动执行 `mcp-server enable`，也不会自动启用 `--unsafe-always-allow-all-agents`。Apple 仅建议在隔离的无人值守环境中使用 unsafe 模式；日常开发机应保留 Agent 授权检查。
 
 ## 功能特性
 
@@ -34,9 +65,19 @@ cd XCodeMCPService
 # 构建 .app（推荐）
 bash build-app.sh
 
+# 查看可用身份；Xcode 27 长期授权需要 Apple 信任链中的签名身份
+security find-identity -v -p codesigning
+
+# 本机安装可使用 Apple Development，并关闭分发用 secure timestamp
+CODE_SIGN_IDENTITY="Apple Development: Your Name (TEAMID)" \
+CODE_SIGN_TIMESTAMP=none \
+bash build-app.sh
+
 # 安装到 Applications
 cp -r "build/XCode MCP Service.app" /Applications/
 ```
+
+> 默认 ad-hoc 签名以及普通自签证书在 Xcode 27 beta 5 中仍可能被识别为 `unsigned`，只能获得临时授权。正式分发可改用 `Developer ID Application`，并保留默认 secure timestamp。打包脚本会为 App 和内层 CLI 一并加入 Apple Events entitlement。
 
 构建产物位于 `build/XCode MCP Service.app`，包含：
 
@@ -51,7 +92,7 @@ cp -r "build/XCode MCP Service.app" /Applications/
 |------|------|------|
 | DMG 镜像 | `build/XCodeMCPService.dmg` | 推荐的 macOS 分发包 |
 | SHA-256 | `build/XCodeMCPService.dmg.sha256` | DMG 校验值 |
-| Zip 压缩包 | `build/XCodeMCPService.app.zip` | 未签名的分发包 |
+| Zip 压缩包 | `build/XCodeMCPService.app.zip` | App 压缩包（默认 ad-hoc 签名，可通过 `CODE_SIGN_IDENTITY` 正式签名） |
 | SHA-256 | `build/XCodeMCPService.app.zip.sha256` | 压缩包校验值 |
 
 > 独立二进制的真实目录请通过 `swift build -c release --show-bin-path` 查询。
@@ -70,6 +111,7 @@ mkdir -p ~/Library/Application\ Support/XCodeMCPService
     "port": 13339,
     "host": "127.0.0.1",
     "timeout": 30000,
+    "capabilityTimeout": 15000,
     "logLevel": "info"
   },
   "servers": [
@@ -85,7 +127,20 @@ mkdir -p ~/Library/Application\ Support/XCodeMCPService
 
 保存为 `~/Library/Application Support/XCodeMCPService/config.json`。
 
-> 不创建配置文件时，服务会使用内置默认配置（端口 13339，自动启动 `xcrun mcpbridge`）。首次启动时自动写入默认路径。
+> 不创建配置文件时，服务会使用内置默认配置（端口 13339，自动启动 `xcrun mcpbridge`）。服务会优先选择当前运行的唯一 Xcode；多实例时优先当前活跃或 `xcode-select` 选中的安装。Xcode 27 的 headless MCP 已启用时，服务优先使用该连接，并刻意不设置 `MCP_XCODE_PID`，让 agent 授权在“重启服务”后继续有效。旧版 Xcode 或未启用 headless 模式的 Xcode 27 才绑定检测到的 GUI 进程。可通过 server 的 `env.DEVELOPER_DIR` 或 `env.MCP_XCODE_PID` 显式覆盖。首次启动时自动写入默认路径。
+
+Xcode 27 的 headless MCP 只需针对当前选中的 Xcode 启用一次：
+
+```bash
+sudo xcrun mcp-server enable
+xcrun mcp-server status
+```
+
+如需显式指定另一个 Xcode，可仅在命令中传入其 Developer 目录：
+
+```bash
+sudo env DEVELOPER_DIR="/path/to/Xcode.app/Contents/Developer" xcrun mcp-server enable
+```
 
 ### 2. 启动服务
 
@@ -128,6 +183,7 @@ CONFIG_PATH=/path/to/config.json "$BIN_DIR/XCodeMCPService"
 | `port` | Int | `13339` | HTTP 监听端口 |
 | `host` | String | `"127.0.0.1"` | 监听地址（仅支持 `127.0.0.1` 或 `localhost`） |
 | `timeout` | Int | `30000` | 请求超时（毫秒） |
+| `capabilityTimeout` | Int | `15000` | 启动和重连时获取单类 capability 的超时（毫秒） |
 | `logLevel` | String | `"info"` | 日志级别：debug / info / warn / error |
 
 ### ServerConfig
@@ -157,7 +213,7 @@ CONFIG_PATH=/path/to/config.json "$BIN_DIR/XCodeMCPService"
 swift test
 ```
 
-83 个测试覆盖：HTTP 解析/序列化/路由、会话管理、ResponseQueue、ID 映射、进程生命周期管理等。
+测试覆盖：HTTP 解析/序列化/路由、会话管理、ResponseQueue、ID 映射、Xcode 运行时选择和进程生命周期管理等。
 
 ## CI/CD
 

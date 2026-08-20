@@ -46,14 +46,14 @@ struct RuntimeHealthTimeoutTests {
         let stopCallCount = await mock.stopCallCount
         let startCallCount = await mock.startCallCount
         let hangDetectedNames = await tracker.hangDetectedNames
-        let restartedNames = await tracker.restartedNames
+        let didRestart = await tracker.waitUntilRestarted(name: "xcode-tools")
         let stateAfterReconnect = await manager.getProcessState(serverName: "xcode-tools")
         let generationAfterReconnect = await manager.currentHealthGeneration(serverName: "xcode-tools")
 
         #expect(stopCallCount == 1)
         #expect(startCallCount == 1)
         #expect(hangDetectedNames.contains("xcode-tools"))
-        #expect(restartedNames.contains("xcode-tools"))
+        #expect(didRestart)
         #expect(stateAfterReconnect?.consecutiveHealthFailures == 0)
         #expect(generationAfterReconnect == 2)
 

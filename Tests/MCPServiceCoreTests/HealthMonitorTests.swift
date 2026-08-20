@@ -32,6 +32,17 @@ actor CallbackTracker {
     func recordHealthCheckFailed(name: String, failures: Int) {
         healthCheckFailedCalls.append((name, failures))
     }
+
+    /// 等待 callback Task 实际写入，避免测试在异步回调入队后立即断言。
+    func waitUntilRestarted(name: String, maxYields: Int = 100) async -> Bool {
+        for _ in 0..<maxYields {
+            if restartedNames.contains(name) {
+                return true
+            }
+            await Task.yield()
+        }
+        return restartedNames.contains(name)
+    }
 }
 
 // MARK: - MockStdioClientManager

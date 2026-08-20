@@ -23,6 +23,9 @@ let package = Package(
             dependencies: [
                 .product(name: "MCP", package: "swift-sdk"),
                 .product(name: "Logging", package: "swift-log")
+            ],
+            linkerSettings: [
+                .linkedFramework("AppKit")
             ]
         ),
         .executableTarget(
@@ -37,7 +40,7 @@ let package = Package(
             dependencies: [
                 "MCPServiceCore"
             ],
-            exclude: ["Info.plist", "AppIcon.icns"],
+            exclude: ["Info.plist", "AppIcon.icns", "XCodeMCPService.entitlements"],
             resources: [
                 .process("Resources")
             ],

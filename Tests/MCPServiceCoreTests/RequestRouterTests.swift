@@ -48,6 +48,7 @@ struct RequestRouterTests {
 
     private func makeToolClient(
         tools: [ToolFixture] = [ToolFixture(name: "slow_tool", response: "done")],
+        listDelayMs: Int = 0,
         responseDelayMs: Int = 0
     ) async throws -> (client: Client, server: Server) {
         let listedTools = tools.map { tool in
@@ -68,7 +69,10 @@ struct RequestRouterTests {
             )
         )
         await server.withMethodHandler(ListTools.self) { _ in
-            ListTools.Result(tools: listedTools, nextCursor: nil)
+            if listDelayMs > 0 {
+                try await Task.sleep(for: .milliseconds(listDelayMs))
+            }
+            return ListTools.Result(tools: listedTools, nextCursor: nil)
         }
         await server.withMethodHandler(CallTool.self) { params in
             if responseDelayMs > 0 {
@@ -86,6 +90,31 @@ struct RequestRouterTests {
     }
 
     // MARK: - Tool Call Tests
+
+    @Test("Capability refresh times out instead of waiting indefinitely")
+    func capabilityRefreshTimesOut() async throws {
+        let mock = MockStdioClientManager()
+        let (client, server) = try await makeToolClient(listDelayMs: 500)
+
+        await mock.setConfiguredServers(["xcode-tools"])
+        await mock.addActiveServer("xcode-tools")
+        await mock.setClient(client, forServer: "xcode-tools")
+
+        let aggregator = CapabilityAggregator(
+            clientManager: mock,
+            capabilityRequestTimeoutMs: 50
+        )
+        let start = ContinuousClock.now
+        let summary = await aggregator.refresh()
+        let elapsed = ContinuousClock.now - start
+
+        #expect(summary.hasSuccessfulFetch == false)
+        #expect(summary.failures["xcode-tools/tools"] == "Timed out after 50ms")
+        #expect(elapsed < .milliseconds(250))
+
+        await client.disconnect()
+        await server.stop()
+    }
 
     @Test("routeToolCall returns failure for unknown tool")
     func toolCallUnknownTool() async {

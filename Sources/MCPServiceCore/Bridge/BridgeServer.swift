@@ -68,13 +68,35 @@ public actor BridgeServer {
 
         // 3. 创建 StdioClientManager 并启动所有子进程
         let clientManager = StdioClientManager(configs: enabledServers)
-        try await clientManager.startAll()
         self.clientManager = clientManager
+        do {
+            try await clientManager.startAll()
+        } catch {
+            await clientManager.stopAll()
+            self.clientManager = nil
+            throw error
+        }
 
         // 4. 创建 CapabilityAggregator 并刷新
-        let aggregator = CapabilityAggregator(clientManager: clientManager)
-        await aggregator.refresh()
+        let aggregator = CapabilityAggregator(
+            clientManager: clientManager,
+            capabilityRequestTimeoutMs: config.bridge.capabilityTimeout
+        )
+        let capabilitySummary = await aggregator.refresh()
         self.aggregator = aggregator
+
+        guard capabilitySummary.hasSuccessfulFetch else {
+            let failureDetails = capabilitySummary.failures
+                .sorted(by: { $0.key < $1.key })
+                .map { "\($0.key): \($0.value)" }
+                .joined(separator: "; ")
+            await clientManager.stopAll()
+            self.aggregator = nil
+            self.clientManager = nil
+            throw BridgeError.internalError(
+                "All capability requests failed\(failureDetails.isEmpty ? "" : ": \(failureDetails)")"
+            )
+        }
 
         // 5. 日志输出聚合结果
         let tools = await aggregator.getAggregatedTools()
@@ -104,7 +126,14 @@ public actor BridgeServer {
 
         // 8. 设置 mcpServerFactory — 闭包 capture local let 避免 actor self 逃逸
         let serverVersion = version
+        let lldbDeveloperDirectoryOverride = enabledServers.first(where: { server in
+            URL(fileURLWithPath: server.command).lastPathComponent == "xcrun"
+                && server.args.first == "mcpbridge"
+        })?.env?["DEVELOPER_DIR"]
         let factory: McpServerFactory = { [aggregator, router] in
+            let lldbController = LLDBSessionController(
+                developerDirectoryOverride: lldbDeveloperDirectoryOverride
+            )
             let server = Server(
                 name: "mcp-forward-bridge",
                 version: serverVersion,
@@ -117,14 +146,30 @@ public actor BridgeServer {
             await BridgeServer.registerHandlers(
                 on: server,
                 aggregator: aggregator,
-                router: router
+                router: router,
+                lldbController: lldbController
             )
-            return server
+            return McpServerSession(
+                server: server,
+                onClose: {
+                    await lldbController.shutdown()
+                }
+            )
         }
         await httpServer.setMcpServerFactory(factory)
 
         // 9. 启动 HTTP 服务器
-        try await httpServer.start()
+        do {
+            try await httpServer.start()
+        } catch {
+            await httpServer.stop()
+            await clientManager.stopAll()
+            self.httpServer = nil
+            self.router = nil
+            self.aggregator = nil
+            self.clientManager = nil
+            throw error
+        }
         logger.info("HTTP server started", metadata: [
             "port": "\(config.bridge.port)",
             "host": config.bridge.host,
@@ -146,8 +191,22 @@ public actor BridgeServer {
                 lifecycleLogger.info("Server restarted, refreshing capabilities", metadata: [
                     "server": name,
                 ])
-                Task { await aggregator.refresh() }
-                eventHandler?(.serverRestarted(name: name))
+                Task {
+                    let summary = await aggregator.refresh()
+                    if summary.hasSuccessfulFetch(for: name) {
+                        eventHandler?(.serverRestarted(name: name))
+                    } else {
+                        let failure = summary.failures
+                            .filter { $0.key.hasPrefix("\(name)/") }
+                            .sorted(by: { $0.key < $1.key })
+                            .map { "\($0.key): \($0.value)" }
+                            .joined(separator: "; ")
+                        eventHandler?(.serverRestartFailed(
+                            name: name,
+                            error: "Capability refresh failed\(failure.isEmpty ? "" : ": \(failure)")"
+                        ))
+                    }
+                }
             },
             onRestartFailed: { name, error in
                 lifecycleLogger.error("Server restart failed", metadata: [
@@ -233,11 +292,15 @@ public actor BridgeServer {
     private static func registerHandlers(
         on server: Server,
         aggregator: CapabilityAggregator,
-        router: RequestRouter
+        router: RequestRouter,
+        lldbController: LLDBSessionController
     ) async {
         // ListTools
         await server.withMethodHandler(ListTools.self) { _ in
+            let lldbTools = LLDBSessionController.advertisedTools()
+            let reservedToolNames = Set(lldbTools.map(\.name))
             let tools = await aggregator.getAggregatedTools()
+                .filter { !reservedToolNames.contains($0.name) }
             return ListTools.Result(
                 tools: tools.map { tool in
                     Tool(
@@ -245,12 +308,22 @@ public actor BridgeServer {
                         description: tool.description,
                         inputSchema: tool.inputSchema
                     )
-                }
+                } + lldbTools
             )
         }
 
         // CallTool
         await server.withMethodHandler(CallTool.self) { params in
+            if let lldbResult = await lldbController.routeToolCall(
+                toolName: params.name,
+                args: params.arguments
+            ) {
+                guard lldbResult.success, let data = lldbResult.data else {
+                    throw MCPError.internalError(lldbResult.error?.message ?? "LLDB tool call failed")
+                }
+                return CallTool.Result(content: data.content, isError: data.isError)
+            }
+
             let result = await router.routeToolCall(
                 toolName: params.name,
                 args: params.arguments
@@ -263,7 +336,9 @@ public actor BridgeServer {
 
         // ListResources
         await server.withMethodHandler(ListResources.self) { _ in
+            async let lldbResources = lldbController.listResources()
             let resources = await aggregator.getAggregatedResources()
+            let serviceResources = await lldbResources
             return ListResources.Result(
                 resources: resources.map { resource in
                     Resource(
@@ -272,12 +347,19 @@ public actor BridgeServer {
                         description: resource.description,
                         mimeType: resource.mimeType
                     )
-                }
+                } + serviceResources
             )
         }
 
         // ReadResource
         await server.withMethodHandler(ReadResource.self) { params in
+            if let lldbResult = await lldbController.routeResourceRead(prefixedURI: params.uri) {
+                guard lldbResult.success, let data = lldbResult.data else {
+                    throw MCPError.internalError(lldbResult.error?.message ?? "LLDB resource read failed")
+                }
+                return ReadResource.Result(contents: data.contents)
+            }
+
             let result = await router.routeResourceRead(prefixedUri: params.uri)
             guard result.success, let data = result.data else {
                 throw MCPError.internalError(result.error?.message ?? "Resource read failed")

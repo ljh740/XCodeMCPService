@@ -12,6 +12,8 @@ public struct SessionInfo: Sendable {
     public let clientTransport: InMemoryTransport
     /// 响应队列，管理 transport 的 receive stream
     let responseQueue: ResponseQueue
+    /// 会话关闭时释放独立的下游资源。
+    let onClose: (@Sendable () async -> Void)?
     /// 会话创建时间
     public let createdAt: Date
 }
@@ -42,10 +44,18 @@ actor SessionManager {
     func createSession(factory: McpServerFactory) async throws -> (String, SessionInfo) {
         let sessionId = Self.generateSecureToken()
         let (clientTransport, serverTransport) = await InMemoryTransport.createConnectedPair()
-        let server = await factory()
+        let serverSession = await factory()
+        let server = serverSession.server
 
-        try await clientTransport.connect()
-        try await server.start(transport: serverTransport)
+        do {
+            try await clientTransport.connect()
+            try await server.start(transport: serverTransport)
+        } catch {
+            await server.stop()
+            await clientTransport.disconnect()
+            await serverSession.onClose?()
+            throw error
+        }
 
         let responseQueue = ResponseQueue(logger: logger.child(label: "response-queue"))
         await responseQueue.start(transport: clientTransport)
@@ -54,6 +64,7 @@ actor SessionManager {
             server: server,
             clientTransport: clientTransport,
             responseQueue: responseQueue,
+            onClose: serverSession.onClose,
             createdAt: Date()
         )
         sessions[sessionId] = session
@@ -68,6 +79,7 @@ actor SessionManager {
         await session.responseQueue.stop()
         await session.server.stop()
         await session.clientTransport.disconnect()
+        await session.onClose?()
         logger.info("Session closed", metadata: ["sessionId": id])
     }
 

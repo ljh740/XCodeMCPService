@@ -5,8 +5,22 @@ import os
 
 // MARK: - Types
 
-/// MCP Server 工厂闭包，每个会话创建独立的 Server 实例
-public typealias McpServerFactory = @Sendable () async -> Server
+/// MCP Server 会话上下文，除 Server 外还可绑定会话级资源清理逻辑。
+public struct McpServerSession: Sendable {
+    public let server: Server
+    public let onClose: (@Sendable () async -> Void)?
+
+    public init(
+        server: Server,
+        onClose: (@Sendable () async -> Void)? = nil
+    ) {
+        self.server = server
+        self.onClose = onClose
+    }
+}
+
+/// MCP Server 工厂闭包，每个 HTTP 会话创建独立的 Server 和下游会话资源。
+public typealias McpServerFactory = @Sendable () async -> McpServerSession
 
 // MARK: - HTTPServer
 
@@ -57,14 +71,10 @@ public actor HTTPServer {
             throw BridgeError.configError("mcpServerFactory must be set before starting HTTPServer")
         }
 
-        let params: NWParameters = .tcp
-        let listener = try NWListener(using: params, on: NWEndpoint.Port(integerLiteral: UInt16(port)))
-
-        // 绑定到指定 host（统一路径，包括 0.0.0.0）
-        listener.parameters.requiredLocalEndpoint = NWEndpoint.hostPort(
-            host: NWEndpoint.Host(host),
-            port: NWEndpoint.Port(integerLiteral: UInt16(port))
-        )
+        // NWListener 会在初始化时复制 parameters；必须在创建 listener 前设置本地 endpoint。
+        // `localhost` 统一绑定到 IPv4 loopback，避免解析成 wildcard 或其他接口。
+        let params = Self.makeListenerParameters(host: host, port: port)
+        let listener = try NWListener(using: params)
 
         self.listener = listener
 
@@ -109,6 +119,16 @@ public actor HTTPServer {
 
             listener.start(queue: .global(qos: .userInitiated))
         }
+    }
+
+    static func makeListenerParameters(host: String, port: Int) -> NWParameters {
+        let params: NWParameters = .tcp
+        let normalizedHost = host == "localhost" ? "127.0.0.1" : host
+        params.requiredLocalEndpoint = NWEndpoint.hostPort(
+            host: NWEndpoint.Host(normalizedHost),
+            port: NWEndpoint.Port(integerLiteral: UInt16(port))
+        )
+        return params
     }
 
     /// 停止 HTTP 服务器，关闭所有会话
