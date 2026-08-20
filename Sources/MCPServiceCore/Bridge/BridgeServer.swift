@@ -13,6 +13,25 @@ public actor BridgeServer {
 
     private let version = "1.0.6"
 
+    /// initialize 响应中的 server instructions。
+    ///
+    /// 只描述 bridge 自身新增的能力：LLDB 工具组既不存在于上游 Xcode MCP，
+    /// 也不在 Xcode 注入宿主提示词的 AgentSystemPromptAddition 模板中，
+    /// 因此除本 bridge 外没有任何地方会说明它们。
+    ///
+    /// 上游 Xcode 工具的用法引导由 Apple 的模板和宿主侧提示词负责，此处不重复。
+    /// 在 tool search 的 deferred 模式下该字段会常驻模型上下文，保持精简。
+    static let serverInstructions = """
+        Bridges the local Xcode MCP server for the currently selected Xcode installation, \
+        and adds LLDB debugging tools that the Xcode server does not provide.
+
+        LLDB tools reach debug sessions in the running Xcode: lldb__sessions_list enumerates \
+        them, lldb__command runs a command against one. If an expected session is missing, \
+        call lldb_refresh_sessions first. lldb__session_create and lldb__session_close depend \
+        on the selected Xcode's lldb-mcp and may report the capability as unavailable; \
+        sessions attached from Xcode still work.
+        """
+
     // MARK: - Properties
 
     private let configPath: String?
@@ -126,6 +145,7 @@ public actor BridgeServer {
 
         // 8. 设置 mcpServerFactory — 闭包 capture local let 避免 actor self 逃逸
         let serverVersion = version
+        let serverInstructions = Self.serverInstructions
         let lldbDeveloperDirectoryOverride = enabledServers.first(where: { server in
             URL(fileURLWithPath: server.command).lastPathComponent == "xcrun"
                 && server.args.first == "mcpbridge"
@@ -137,6 +157,7 @@ public actor BridgeServer {
             let server = Server(
                 name: "mcp-forward-bridge",
                 version: serverVersion,
+                instructions: serverInstructions,
                 capabilities: .init(
                     prompts: .init(),
                     resources: .init(),
