@@ -8,7 +8,23 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$SCRIPT_DIR"
 OUTPUT_DIR="$PROJECT_DIR/build"
 BUILD_CONFIGURATION="${BUILD_CONFIGURATION:-release}"
-CODE_SIGN_IDENTITY="${CODE_SIGN_IDENTITY:--}"
+if [ -z "${CODE_SIGN_IDENTITY:-}" ]; then
+    CODE_SIGN_IDENTITY="-"
+    if command -v ruby >/dev/null 2>&1 &&
+        AUTO_SIGNING="$(ruby "$PROJECT_DIR/scripts/signing_identity.rb")"; then
+        AUTO_IDENTITY="${AUTO_SIGNING%%$'\n'*}"
+        AUTO_TIMESTAMP="${AUTO_SIGNING#*$'\n'}"
+        if [[ "$AUTO_IDENTITY" =~ ^([A-Fa-f0-9]{40}|-)$ &&
+              "$AUTO_TIMESTAMP" =~ ^(auto|none)$ ]]; then
+            CODE_SIGN_IDENTITY="$AUTO_IDENTITY"
+            CODE_SIGN_TIMESTAMP="${CODE_SIGN_TIMESTAMP:-$AUTO_TIMESTAMP}"
+        else
+            echo "Invalid signing discovery output; using ad-hoc signing" >&2
+        fi
+    else
+        echo "Signing discovery unavailable (Ruby/OpenSSL required); using ad-hoc signing" >&2
+    fi
+fi
 CODE_SIGN_RUNTIME="${CODE_SIGN_RUNTIME:-1}"
 CODE_SIGN_TIMESTAMP="${CODE_SIGN_TIMESTAMP:-auto}"
 
@@ -101,7 +117,7 @@ echo "Copied resource bundle for localization"
 # 7. 创建 PkgInfo
 echo -n "APPL????" > "$APP_BUNDLE/Contents/PkgInfo"
 
-# 8. 先签内层可执行文件，再签整个 App bundle；未指定 identity 时使用 ad-hoc 签名
+# 8. 先签内层可执行文件，再签整个 App bundle；实际签名失败时退出，不静默降级
 echo "=== Signing ${APP_NAME}.app ==="
 if [ "$CODE_SIGN_IDENTITY" = "-" ]; then
     echo "Using ad-hoc signing; Xcode may still grant only temporary agent trust"

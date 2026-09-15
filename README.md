@@ -77,7 +77,9 @@ bash build-app.sh
 cp -r "build/XCode MCP Service.app" /Applications/
 ```
 
-> The default ad-hoc signature and ordinary self-signed certificates may still appear as `unsigned` in Xcode 27 beta 5 and receive temporary grants only. For distribution, use `Developer ID Application` and keep the default secure timestamp. The packaging script applies the Apple Events entitlement to both the app and its bundled CLI.
+> Without `CODE_SIGN_IDENTITY`, the script discovers valid Apple code-signing identities in the current Keychain search list. It selects the sole candidate Team matching an unexpired signed Xcode grant, or otherwise the sole candidate Team. Multiple eligible Teams without a unique match require an explicit `CODE_SIGN_IDENTITY`; the script prints a warning and retains ad-hoc signing instead of choosing a Team for you. Within the selected Team, development certificates take precedence, followed by later expiration dates and fingerprint order. Team IDs come from certificate OU fields, not display names.
+>
+> Discovery uses optional Ruby/OpenSSL support; it installs nothing and does not unlock Keychains or change Xcode permissions. Missing dependencies, inaccessible Keychains, or no eligible certificate fall back to ad-hoc signing. Xcode's `mcp-server` is optional: without it, only an unambiguous Team can be selected. CI without a signing identity continues to work. Set `CODE_SIGN_IDENTITY="-"` to skip discovery and explicitly retain ad-hoc signing, or specify an identity for a reproducible signed build. Actual signing failures stop the build instead of silently downgrading. Auto-selected development identities disable timestamps unless `CODE_SIGN_TIMESTAMP` is explicitly set; Developer ID identities retain secure timestamps by default. Ad-hoc and ordinary self-signed signatures may receive only temporary Xcode grants. For distribution, explicitly choose `Developer ID Application`. The packaging script preserves the Apple Events entitlement on both executables.
 
 Build output is at `build/XCode MCP Service.app`, containing:
 
@@ -92,7 +94,7 @@ The packaging script also produces:
 |----------|------|-------------|
 | Disk image | `build/XCodeMCPService.dmg` | Recommended macOS release package |
 | SHA-256 | `build/XCodeMCPService.dmg.sha256` | Disk image checksum |
-| Zip archive | `build/XCodeMCPService.app.zip` | App archive (ad-hoc signed by default; stable identity is optional) |
+| Zip archive | `build/XCodeMCPService.app.zip` | App archive (automatic identity selection, with ad-hoc fallback) |
 | SHA-256 | `build/XCodeMCPService.app.zip.sha256` | Archive checksum |
 
 > You can locate standalone binaries with `swift build -c release --show-bin-path`.

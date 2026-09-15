@@ -35,3 +35,8 @@ jobs:
 
       - name: Run tests
         run: swift test --parallel
+
+      - name: Test signing discovery
+        run: |
+          bash -n build-app.sh
+          /usr/bin/ruby Tests/signing_identity_test.rb

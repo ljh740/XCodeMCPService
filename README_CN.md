@@ -77,7 +77,9 @@ bash build-app.sh
 cp -r "build/XCode MCP Service.app" /Applications/
 ```
 
-> 默认 ad-hoc 签名以及普通自签证书在 Xcode 27 beta 5 中仍可能被识别为 `unsigned`，只能获得临时授权。正式分发可改用 `Developer ID Application`，并保留默认 secure timestamp。打包脚本会为 App 和内层 CLI 一并加入 Apple Events entitlement。
+> 未设置 `CODE_SIGN_IDENTITY` 时，脚本从当前 Keychain 搜索列表发现有效的 Apple 代码签名身份。优先选择唯一匹配本应用未过期 Xcode signed 授权的候选 Team；没有匹配时，仅在候选 Team 唯一的情况下自动选择。多个 Team 无法唯一确定时会提示显式设置 `CODE_SIGN_IDENTITY`，并保留 ad-hoc 签名，不替用户选择个人或公司身份。同一 Team 内优先开发证书，再按到期时间和指纹稳定排序。Team ID 读取证书 OU，不使用名称括号。
+>
+> 自动发现依赖可选的 Ruby/OpenSSL，不安装依赖、不解锁 Keychain、不修改 Xcode 授权。依赖缺失、Keychain 不可读或无有效证书时回退 ad-hoc。`mcp-server` 仅用于偏好匹配，缺失时仍可选择唯一 Team；没有证书的 CI 保持可用。设置 `CODE_SIGN_IDENTITY="-"` 可跳过检测并强制 ad-hoc，显式指定身份可保证签名选择可复现。实际签名失败仍终止构建，不静默降级。自动选中的开发证书默认关闭时间戳，Developer ID 默认保留安全时间戳；显式 `CODE_SIGN_TIMESTAMP` 优先。ad-hoc 和普通自签名证书可能仅获 Xcode 临时授权；分发请显式选择 `Developer ID Application`。两个可执行文件的 Apple Events entitlement 均保留。
 
 构建产物位于 `build/XCode MCP Service.app`，包含：
 
@@ -92,7 +94,7 @@ cp -r "build/XCode MCP Service.app" /Applications/
 |------|------|------|
 | DMG 镜像 | `build/XCodeMCPService.dmg` | 推荐的 macOS 分发包 |
 | SHA-256 | `build/XCodeMCPService.dmg.sha256` | DMG 校验值 |
-| Zip 压缩包 | `build/XCodeMCPService.app.zip` | App 压缩包（默认 ad-hoc 签名，可通过 `CODE_SIGN_IDENTITY` 正式签名） |
+| Zip 压缩包 | `build/XCodeMCPService.app.zip` | App 压缩包（自动选择签名身份，无法确定时回退 ad-hoc） |
 | SHA-256 | `build/XCodeMCPService.app.zip.sha256` | 压缩包校验值 |
 
 > 独立二进制的真实目录请通过 `swift build -c release --show-bin-path` 查询。
