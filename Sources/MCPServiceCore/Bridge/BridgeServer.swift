@@ -11,7 +11,7 @@ public actor BridgeServer {
 
     // MARK: - Constants
 
-    private let version = "1.0.9"
+    private let version = "1.0.10"
 
     /// initialize 响应中的 server instructions。
     ///
