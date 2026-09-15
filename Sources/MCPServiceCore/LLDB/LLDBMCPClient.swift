@@ -10,6 +10,7 @@ protocol LLDBMCPClient: Actor, Sendable {
     func start() async throws
     func stop() async
     func isRunning() async -> Bool
+    func processIdentifier() async -> Int32?
     func listTools() async throws -> [Tool]
     func callTool(name: String, arguments: [String: Value]?) async throws -> LLDBToolResponse
     func listResources() async throws -> [Resource]
@@ -43,6 +44,10 @@ actor StdioLLDBMCPClient: LLDBMCPClient {
 
     func isRunning() async -> Bool {
         await manager.isServerRunning(name: Self.serverName)
+    }
+
+    func processIdentifier() async -> Int32? {
+        await manager.processIdentifier(name: Self.serverName)
     }
 
     func listTools() async throws -> [Tool] {

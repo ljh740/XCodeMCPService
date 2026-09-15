@@ -59,13 +59,30 @@ private actor FakeLLDBMCPClient: LLDBMCPClient {
     private var stopCount = 0
     private var sessions: [String]
     private let toolNames: [String]
+    private let adapterPID: Int32?
+    private let failsListingTools: Bool
+    private let failsCreatingSession: Bool
+    private let onCreate: (@Sendable () async -> Void)?
+    private let onStop: (@Sendable () async -> Void)?
+    private var heldOperation: String?
+    private var operationContinuation: CheckedContinuation<Void, Never>?
 
     init(
         sessions: [String] = ["lldb-mcp://instance/900/debugger/1"],
-        toolNames: [String] = ["session_create", "command", "sessions_list", "session_close"]
+        toolNames: [String] = ["session_create", "command", "sessions_list", "session_close"],
+        adapterPID: Int32? = 699,
+        failsListingTools: Bool = false,
+        failsCreatingSession: Bool = false,
+        onCreate: (@Sendable () async -> Void)? = nil,
+        onStop: (@Sendable () async -> Void)? = nil
     ) {
         self.sessions = sessions
         self.toolNames = toolNames
+        self.adapterPID = adapterPID
+        self.failsListingTools = failsListingTools
+        self.failsCreatingSession = failsCreatingSession
+        self.onCreate = onCreate
+        self.onStop = onStop
     }
 
     func start() async throws {
@@ -74,25 +91,37 @@ private actor FakeLLDBMCPClient: LLDBMCPClient {
     }
 
     func stop() async {
+        await suspendIfNeeded("stop")
         if running {
             stopCount += 1
         }
         running = false
+        await onStop?()
     }
 
     func isRunning() async -> Bool {
         running
     }
 
+    func processIdentifier() async -> Int32? { running ? adapterPID : nil }
+
     func listTools() async throws -> [Tool] {
-        toolNames.map { name in
+        if failsListingTools {
+            throw BridgeError.internalError("Fixture capability failure")
+        }
+        return toolNames.map { name in
             Tool(name: name, description: name, inputSchema: [:])
         }
     }
 
     func callTool(name: String, arguments: [String: Value]?) async throws -> LLDBToolResponse {
+        await suspendIfNeeded("tool")
         switch name {
         case "session_create":
+            await onCreate?()
+            if failsCreatingSession {
+                return LLDBToolResponse(content: [textContent("Fixture creation failure")], isError: true)
+            }
             let session = "lldb-mcp://instance/900/debugger/2"
             sessions.append(session)
             return LLDBToolResponse(content: [textContent(session)], isError: false)
@@ -109,11 +138,28 @@ private actor FakeLLDBMCPClient: LLDBMCPClient {
     }
 
     func listResources() async throws -> [Resource] {
-        [Resource(name: "debugger", uri: "lldb://instance/900/debugger/1")]
+        await suspendIfNeeded("list")
+        return [Resource(name: "debugger", uri: "lldb://instance/900/debugger/1")]
     }
 
     func readResource(uri: String) async throws -> [Resource.Content] {
-        [.text("{}", uri: uri, mimeType: "application/json")]
+        await suspendIfNeeded("read")
+        return [.text("{}", uri: uri, mimeType: "application/json")]
+    }
+
+    func hold(_ operation: String) { heldOperation = operation }
+
+    func isSuspended() -> Bool { operationContinuation != nil }
+
+    func resume() {
+        heldOperation = nil
+        operationContinuation?.resume()
+        operationContinuation = nil
+    }
+
+    private func suspendIfNeeded(_ operation: String) async {
+        guard heldOperation == operation else { return }
+        await withCheckedContinuation { operationContinuation = $0 }
     }
 
     func counts() -> (starts: Int, stops: Int) {
@@ -127,6 +173,148 @@ private actor FakeLLDBMCPClient: LLDBMCPClient {
 
 @Suite("LLDB Session Controller Tests")
 struct LLDBSessionControllerTests {
+    @Test("Idle adapters are reclaimed even with owned sessions and restart on demand")
+    func idleReclaimsAndRestarts() async throws {
+        let fixture = try makeRuntime(version: "27.0", includesLLDBMCP: true)
+        defer { try? FileManager.default.removeItem(at: fixture.rootURL) }
+        let client = FakeLLDBMCPClient()
+        let controller = makeController(runtime: fixture.runtime, client: client, idleTimeout: .milliseconds(50))
+        _ = await controller.routeToolCall(toolName: "lldb__session_create", args: nil)
+        try await waitUntil { await client.counts().stops == 1 }
+        #expect(await client.counts().starts == 1)
+        let result = await controller.routeToolCall(toolName: "lldb__sessions_list", args: nil)
+        #expect(result?.data?.isError == false)
+        #expect(await client.counts().starts == 2)
+        await controller.shutdown()
+    }
+
+    @Test("Idle collection waits for tools and resource operations", arguments: ["tool", "list", "read"])
+    func inFlightOperationsAreProtected(operation: String) async throws {
+        let fixture = try makeRuntime(version: "27.0", includesLLDBMCP: true)
+        defer { try? FileManager.default.removeItem(at: fixture.rootURL) }
+        let client = FakeLLDBMCPClient()
+        let controller = makeController(runtime: fixture.runtime, client: client, idleTimeout: .milliseconds(50))
+        _ = await controller.routeToolCall(toolName: "lldb__sessions_list", args: nil)
+        await client.hold(operation)
+        let call = Task {
+            switch operation {
+            case "list": _ = await controller.listResources()
+            case "read": _ = await controller.routeResourceRead(prefixedURI: "lldb__lldb://debugger/1")
+            default: _ = await controller.routeToolCall(toolName: "lldb__command", args: ["command": "bt"])
+            }
+        }
+        try await waitUntil { await client.isSuspended() }
+        try await Task.sleep(for: .milliseconds(100))
+        #expect(await client.counts().stops == 0)
+        await client.resume()
+        await call.value
+        try await waitUntil { await client.counts().stops == 1 }
+        await controller.shutdown()
+    }
+
+    @Test("New requests wait for idle cleanup before restarting")
+    func requestDuringCleanup() async throws {
+        let fixture = try makeRuntime(version: "27.0", includesLLDBMCP: true)
+        defer { try? FileManager.default.removeItem(at: fixture.rootURL) }
+        let client = FakeLLDBMCPClient()
+        let controller = makeController(runtime: fixture.runtime, client: client, idleTimeout: .milliseconds(50))
+        await client.hold("stop")
+        _ = await controller.routeToolCall(toolName: "lldb__sessions_list", args: nil)
+        try await waitUntil { await client.isSuspended() }
+        let call = Task { await controller.routeToolCall(toolName: "lldb__sessions_list", args: nil) }
+        try await Task.sleep(for: .milliseconds(100))
+        #expect(await client.counts().starts == 1)
+        await client.resume()
+        let result = await call.value
+        #expect(result?.data?.isError == false)
+        #expect(await client.counts() == (starts: 2, stops: 1))
+        await controller.shutdown()
+    }
+
+    @Test("Explicit and automatic refresh preserve in-flight resource operations", arguments: ["list", "read"])
+    func refreshPreservesResourceOperations(operation: String) async throws {
+        let fixture = try makeRuntime(version: "27.0", includesLLDBMCP: true)
+        defer { try? FileManager.default.removeItem(at: fixture.rootURL) }
+        let client = FakeLLDBMCPClient()
+        let registry = MutableLLDBRegistryManager()
+        let controller = makeController(runtime: fixture.runtime, registry: registry, client: client)
+        _ = await controller.routeToolCall(toolName: "lldb__sessions_list", args: nil)
+        await client.hold(operation)
+        let pending = Task {
+            if operation == "list" {
+                _ = await controller.listResources()
+            } else {
+                _ = await controller.routeResourceRead(prefixedURI: "lldb__lldb://debugger/1")
+            }
+        }
+        try await waitUntil { await client.isSuspended() }
+
+        let refresh = await controller.routeToolCall(toolName: "lldb_refresh_sessions", args: ["force": true])
+        #expect(refresh?.data.map(text(from:))?.contains(#""action" : "blocked""#) == true)
+        await registry.setSnapshot(snapshot(processIdentifier: 100))
+        _ = await controller.routeToolCall(toolName: "lldb__sessions_list", args: nil)
+        #expect(await client.counts() == (starts: 1, stops: 0))
+
+        await client.resume()
+        await pending.value
+        _ = await controller.routeToolCall(toolName: "lldb_refresh_sessions", args: nil)
+        #expect(await client.counts() == (starts: 2, stops: 1))
+        await controller.shutdown()
+    }
+
+    @Test("Capability failure captures owned backends before stopping the adapter", arguments: [true, false])
+    func failedStartupCapturesOwnedBackends(hasAdapterPID: Bool) async throws {
+        let fixture = try makeRuntime(version: "27.0", includesLLDBMCP: true)
+        defer { try? FileManager.default.removeItem(at: fixture.rootURL) }
+        let registry = MutableLLDBRegistryManager(
+            snapshot: LLDBRegistrySnapshot(entries: [
+                backend(processIdentifier: 700, parent: 699, runtime: fixture.runtime),
+                backend(processIdentifier: 800, parent: 799, runtime: fixture.runtime),
+            ]),
+            queuedSnapshots: [.empty, .empty]
+        )
+        let client = FakeLLDBMCPClient(
+            adapterPID: hasAdapterPID ? 699 : nil,
+            failsListingTools: true,
+            onStop: { await registry.setSnapshot(.empty) }
+        )
+        let controller = makeController(runtime: fixture.runtime, registry: registry, client: client)
+        let result = await controller.routeToolCall(toolName: "lldb__sessions_list", args: nil)
+
+        #expect(result?.data?.isError == true)
+        #expect(await client.counts() == (starts: 1, stops: 1))
+        #expect(await registry.terminatedProcesses() == (hasAdapterPID ? [700] : []))
+        await controller.shutdown()
+    }
+
+    @Test("Session creation tracks only this adapter's backends, including error responses", arguments: [false, true])
+    func creationTracksOwnedBackends(fails: Bool) async throws {
+        let fixture = try makeRuntime(version: "27.0", includesLLDBMCP: true)
+        defer { try? FileManager.default.removeItem(at: fixture.rootURL) }
+        let registry = MutableLLDBRegistryManager()
+        let created = LLDBRegistrySnapshot(entries: [
+            backend(processIdentifier: 700, parent: 699, runtime: fixture.runtime),
+            backend(processIdentifier: 800, parent: 799, runtime: fixture.runtime),
+        ])
+        let client = FakeLLDBMCPClient(
+            failsCreatingSession: fails,
+            onCreate: { await registry.setSnapshot(created) }
+        )
+        let controller = makeController(runtime: fixture.runtime, registry: registry, client: client)
+        let result = await controller.routeToolCall(toolName: "lldb__session_create", args: nil)
+        #expect(result?.data?.isError == fails)
+        await controller.shutdown()
+        #expect(await registry.terminatedProcesses() == [700])
+    }
+
+    private func waitUntil(_ condition: () async -> Bool) async throws {
+        let deadline = ContinuousClock.now + .seconds(5)
+        while !(await condition()) {
+            try #require(ContinuousClock.now < deadline, "Timed out waiting for lifecycle event")
+            try await Task.sleep(for: .milliseconds(5))
+        }
+    }
+
     @Test("Stable surface includes refresh and all four LLDB tools")
     func advertisedToolsAreStable() {
         let names = Set(LLDBSessionController.advertisedTools().map(\.name))
@@ -286,8 +474,8 @@ struct LLDBSessionControllerTests {
         #expect(await fakeClient.counts() == (starts: 1, stops: 1))
     }
 
-    @Test("Closing the HTTP session terminates only LLDB backends spawned by its adapter")
-    func shutdownTerminatesOwnedBackend() async throws {
+    @Test("Shutdown and idle collection terminate only this adapter's backends", arguments: [false, true])
+    func shutdownTerminatesOwnedBackend(idle: Bool) async throws {
         let fixture = try makeRuntime(version: "27.0", includesLLDBMCP: true)
         defer { try? FileManager.default.removeItem(at: fixture.rootURL) }
         let fakeClient = FakeLLDBMCPClient()
@@ -306,21 +494,32 @@ struct LLDBSessionControllerTests {
             queuedSnapshots: [
                 .empty,
                 .empty,
-                LLDBRegistrySnapshot(entries: [ownedBackend]),
+                LLDBRegistrySnapshot(entries: [ownedBackend, LLDBRegistryEntry(
+                    fileURL: URL(fileURLWithPath: "/tmp/lldb-mcp-800.json"),
+                    processIdentifier: 800,
+                    connectionURI: nil,
+                    contents: "another adapter",
+                    processExecutablePath: ownedBackend.processExecutablePath,
+                    parentProcessIdentifier: 799,
+                    parentProcessExecutablePath: ownedBackend.parentProcessExecutablePath
+                )]),
             ]
         )
         let controller = makeController(
             runtime: fixture.runtime,
             registry: registry,
-            client: fakeClient
+            client: fakeClient,
+            idleTimeout: idle ? .milliseconds(50) : .seconds(1800)
         )
 
         _ = try #require(await controller.routeToolCall(
             toolName: "lldb__sessions_list",
             args: nil
         ))
+        if idle {
+            try await waitUntil { await registry.terminatedProcesses() == [700] }
+        }
         await controller.shutdown()
-
         #expect(await registry.terminatedProcesses() == [700])
     }
 
@@ -365,11 +564,13 @@ struct LLDBSessionControllerTests {
     private func makeController(
         runtime: XcodeRuntime,
         registry: MutableLLDBRegistryManager = MutableLLDBRegistryManager(),
-        client: FakeLLDBMCPClient
+        client: FakeLLDBMCPClient,
+        idleTimeout: Duration = .seconds(30 * 60)
     ) -> LLDBSessionController {
         LLDBSessionController(
             runtimeResolver: StaticLLDBRuntimeResolver(runtime: runtime),
             registryManager: registry,
+            idleTimeout: idleTimeout,
             clientFactory: { _ in client }
         )
     }
@@ -384,6 +585,18 @@ struct LLDBSessionControllerTests {
                 contents: "\(processIdentifier)"
             )
         ])
+    }
+
+    private func backend(processIdentifier: Int32, parent: Int32, runtime: XcodeRuntime) -> LLDBRegistryEntry {
+        LLDBRegistryEntry(
+            fileURL: URL(fileURLWithPath: "/tmp/lldb-mcp-\(processIdentifier).json"),
+            processIdentifier: processIdentifier,
+            connectionURI: nil,
+            contents: "backend",
+            processExecutablePath: runtime.developerDirectoryURL.appendingPathComponent("usr/bin/lldb").path,
+            parentProcessIdentifier: parent,
+            parentProcessExecutablePath: runtime.developerDirectoryURL.appendingPathComponent("usr/bin/lldb-mcp").path
+        )
     }
 
     private func text(from result: ToolCallResult) -> String {

@@ -15,16 +15,21 @@ actor LLDBSessionController {
     private var ownedSessionURIs: Set<String> = []
     private var ownedBackendEntries: [Int32: LLDBRegistryEntry] = [:]
     private var untrackedOwnedSessionCount = 0
-    private var activeCallCount = 0
     private var generation = 0
     private var lastFailure: String?
     private var transitionTask: Task<AdapterTransition, Never>?
     private var appliedTransitionIdentifier: UUID?
+    private let idleTimeout: Duration
+    private var idleTask: Task<Void, Never>?
+    private var idleToken: UUID?
+    private var activeOperationCount = 0
+    private var cleanupTask: Task<Void, Never>?
 
     init(
         developerDirectoryOverride: String? = nil,
         runtimeResolver: any XcodeRuntimeResolving = DefaultXcodeRuntimeResolver(),
         registryManager: any LLDBRegistryManaging = DefaultLLDBRegistryManager(),
+        idleTimeout: Duration = .seconds(30 * 60),
         clientFactory: @escaping LLDBMCPClientFactory = { runtime in
             StdioLLDBMCPClient(runtime: runtime)
         }
@@ -32,7 +37,12 @@ actor LLDBSessionController {
         self.developerDirectoryOverride = developerDirectoryOverride
         self.runtimeResolver = runtimeResolver
         self.registryManager = registryManager
+        self.idleTimeout = idleTimeout
         self.clientFactory = clientFactory
+    }
+
+    deinit {
+        idleTask?.cancel()
     }
 
     // MARK: - Stable MCP Surface
@@ -46,6 +56,8 @@ actor LLDBSessionController {
         args: [String: Value]?
     ) async -> RouteResult<ToolCallResult>? {
         if toolName == LLDBToolCatalog.refreshToolName {
+            await beginOperation()
+            defer { endOperation() }
             let force = args?["force"]?.boolValue ?? false
             return .success(await refresh(force: force))
         }
@@ -53,6 +65,9 @@ actor LLDBSessionController {
         guard let downstreamName = LLDBToolCatalog.stableDownstreamName(from: toolName) else {
             return nil
         }
+
+        await beginOperation()
+        defer { endOperation() }
 
         let preparation = await prepareForOperation(autoRefreshWhenChanged: true)
         switch preparation {
@@ -83,6 +98,8 @@ actor LLDBSessionController {
     }
 
     func listResources() async -> [Resource] {
+        await beginOperation()
+        defer { endOperation() }
         let preparation = await prepareForOperation(autoRefreshWhenChanged: true)
         guard case .ready(let readyClient, _) = preparation else { return [] }
 
@@ -119,6 +136,9 @@ actor LLDBSessionController {
             )
         }
 
+        await beginOperation()
+        defer { endOperation() }
+
         let preparation = await prepareForOperation(autoRefreshWhenChanged: true)
         switch preparation {
         case .ready(let readyClient, _):
@@ -139,6 +159,60 @@ actor LLDBSessionController {
     }
 
     func shutdown() async {
+        cancelIdleTimer()
+        if let cleanupTask {
+            await cleanupTask.value
+            return
+        }
+        let task = Task {
+            await self.releaseResources()
+            self.cleanupTask = nil
+        }
+        cleanupTask = task
+        await task.value
+    }
+
+    // 清理与重启之间设置屏障，避免 actor 重入时旧清理任务关闭新适配器。
+    private func beginOperation() async {
+        activeOperationCount += 1
+        cancelIdleTimer()
+        if let cleanupTask {
+            await cleanupTask.value
+        }
+    }
+
+    private func endOperation() {
+        activeOperationCount -= 1
+        guard activeOperationCount == 0, client != nil else { return }
+        let token = UUID()
+        idleToken = token
+        let timeout = idleTimeout
+        idleTask = Task { [weak self] in
+            do {
+                try await Task.sleep(for: timeout)
+            } catch {
+                return
+            }
+            await self?.reclaimIdleResources(token: token)
+        }
+    }
+
+    private func cancelIdleTimer() {
+        idleTask?.cancel()
+        idleTask = nil
+        idleToken = nil
+    }
+
+    private func reclaimIdleResources(token: UUID) async {
+        guard idleToken == token, activeOperationCount == 0 else { return }
+        logger.info("Reclaiming idle LLDB adapter", metadata: [
+            "ownedSessionCount": "\(ownedSessionCount)",
+            "ownedBackendCount": "\(ownedBackendEntries.count)",
+        ])
+        await shutdown()
+    }
+
+    private func releaseResources() async {
         if let transitionTask {
             let transition = await transitionTask.value
             apply(transition)
@@ -167,13 +241,13 @@ actor LLDBSessionController {
         let support = await resolveSupport()
         switch support {
         case .unsupported(let context):
-            if ownedSessionCount > 0 {
+            if ownedSessionCount > 0 || activeOperationCount > 1 {
                 return reportToolResult(LLDBToolReport(
                     action: "blocked",
                     supported: false,
                     generation: generation,
                     reason: context.reason,
-                    message: "\(context.message) The current adapter was preserved because this connection owns active LLDB sessions.",
+                    message: "\(context.message) The current adapter was preserved because this connection owns active LLDB sessions or another operation is in progress.",
                     xcodeVersion: context.xcodeVersion,
                     xcodeBuild: context.xcodeBuild,
                     xcodePath: context.xcodePath,
@@ -213,7 +287,7 @@ actor LLDBSessionController {
             ))
 
         case .supported(let selectedRuntime):
-            if activeCallCount > 0 {
+            if activeOperationCount > 1 {
                 return blockedRefreshResult(
                     runtime: selectedRuntime,
                     message: "LLDB refresh is blocked while another LLDB operation is in progress. Retry after it completes."
@@ -283,10 +357,13 @@ actor LLDBSessionController {
         let support = await resolveSupport()
         switch support {
         case .unsupported(let context):
-            if let client, ownedSessionCount > 0, await client.isRunning() {
+            if let client,
+               ownedSessionCount > 0 || activeOperationCount > 1,
+               await client.isRunning()
+            {
                 return .ready(
                     client,
-                    "The selected Xcode no longer provides lldb-mcp. The existing adapter remains active to preserve sessions created by this connection."
+                    "The selected Xcode no longer provides lldb-mcp. The existing adapter remains active to preserve owned sessions or an in-flight operation."
                 )
             }
             if let client {
@@ -323,7 +400,7 @@ actor LLDBSessionController {
                 return .ready(client, nil)
             }
 
-            if (ownedSessionCount > 0 || activeCallCount > 0),
+            if (ownedSessionCount > 0 || activeOperationCount > 1),
                let client,
                adapterRunning
             {
@@ -412,11 +489,12 @@ actor LLDBSessionController {
             let nextClient = clientFactory(selectedRuntime)
             do {
                 try await nextClient.start()
+                let adapterPID = await nextClient.processIdentifier()
                 let tools = try await nextClient.listTools()
                 let snapshot = await registryManager.snapshot()
                 let ownedBackends = snapshot.backendsSpawnedByMultiplexer(
                     since: snapshotBeforeStart
-                )
+                ).filter { $0.parentProcessIdentifier == adapterPID && adapterPID != nil }
                 return .ready(
                     nextClient,
                     selectedRuntime,
@@ -427,11 +505,13 @@ actor LLDBSessionController {
                     identifier
                 )
             } catch {
-                await nextClient.stop()
+                let adapterPID = await nextClient.processIdentifier()
+                // 适配器退出后后台进程可能被重新托管，必须在停止前捕获归属。
                 let snapshotAfterFailure = await registryManager.snapshot()
                 let ownedBackends = snapshotAfterFailure.backendsSpawnedByMultiplexer(
                     since: snapshotBeforeStart
-                )
+                ).filter { $0.parentProcessIdentifier == adapterPID && adapterPID != nil }
+                await nextClient.stop()
                 _ = await registryManager.terminateOwnedBackendProcesses(ownedBackends)
                 let context = LLDBSupportContext.runtime(
                     selectedRuntime,
@@ -504,13 +584,13 @@ actor LLDBSessionController {
         args: [String: Value]?,
         warning: String?
     ) async -> ToolCallResult {
-        activeCallCount += 1
         let snapshotBeforeCall = semanticName == "session_create"
             ? await registryManager.snapshot()
             : nil
+        let adapterPID = await client.processIdentifier()
         do {
             var result = try await client.callTool(name: downstreamName, arguments: args)
-            activeCallCount -= 1
+            await recordOwnedBackends(since: snapshotBeforeCall, adapterPID: adapterPID)
 
             if result.isError != true {
                 trackOwnershipAfterSuccessfulCall(
@@ -518,17 +598,6 @@ actor LLDBSessionController {
                     args: args,
                     content: result.content
                 )
-                if let snapshotBeforeCall {
-                    let snapshotAfterCall = await registryManager.snapshot()
-                    for entry in snapshotAfterCall.backendsSpawnedByMultiplexer(
-                        since: snapshotBeforeCall
-                    ) {
-                        if let processIdentifier = entry.processIdentifier {
-                            ownedBackendEntries[processIdentifier] = entry
-                        }
-                    }
-                    registrySnapshot = snapshotAfterCall
-                }
             }
             if let warning {
                 result = LLDBToolResponse(
@@ -538,13 +607,26 @@ actor LLDBSessionController {
             }
             return ToolCallResult(content: result.content, isError: result.isError)
         } catch {
-            activeCallCount -= 1
+            await recordOwnedBackends(since: snapshotBeforeCall, adapterPID: adapterPID)
             return errorToolResult(
                 action: "failed",
                 reason: "lldb_tool_call_failed",
                 message: "LLDB tool '\(downstreamName)' failed: \(error.localizedDescription)"
             )
         }
+    }
+
+    private func recordOwnedBackends(since previous: LLDBRegistrySnapshot?, adapterPID: Int32?) async {
+        guard let previous else { return }
+        let snapshot = await registryManager.snapshot()
+        // 创建会话报错也可能留下后台进程；仅记录已确认属于当前适配器的进程。
+        for entry in snapshot.backendsSpawnedByMultiplexer(since: previous)
+        where adapterPID != nil && entry.parentProcessIdentifier == adapterPID {
+            if let processIdentifier = entry.processIdentifier {
+                ownedBackendEntries[processIdentifier] = entry
+            }
+        }
+        registrySnapshot = snapshot
     }
 
     private func trackOwnershipAfterSuccessfulCall(

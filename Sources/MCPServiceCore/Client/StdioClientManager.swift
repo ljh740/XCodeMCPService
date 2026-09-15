@@ -326,6 +326,10 @@ public actor StdioClientManager: StdioClientManaging {
         servers[name]?.client
     }
 
+    func processIdentifier(name: String) -> Int32? {
+        servers[name]?.process.processIdentifier
+    }
+
     /// 获取所有运行中的服务器名称
     public func getActiveServers() -> [String] {
         Array(servers.keys)
