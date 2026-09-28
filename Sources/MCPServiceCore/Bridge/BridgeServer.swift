@@ -131,16 +131,13 @@ public actor BridgeServer {
         let router = RequestRouter(
             clientManager: clientManager,
             aggregator: aggregator,
-            timeout: config.bridge.timeout
+            timeout: config.bridge.timeout,
+            toolTimeouts: config.bridge.toolTimeouts
         )
         self.router = router
 
         // 7. 创建 HTTPServer
-        let httpServer = HTTPServer(
-            port: config.bridge.port,
-            host: config.bridge.host,
-            responseTimeoutMs: config.bridge.timeout + HTTPServer.responseTimeoutGraceMs
-        )
+        let httpServer = HTTPServer(config: config.bridge)
         self.httpServer = httpServer
 
         // 8. 设置 mcpServerFactory — 闭包 capture local let 避免 actor self 逃逸

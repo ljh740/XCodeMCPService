@@ -51,6 +51,16 @@ public actor HTTPServer {
 
     // MARK: - Init
 
+    init(config: BridgeConfig) {
+        // HTTP 需覆盖最长路由超时并留出错误回传时间；普通请求仍由路由按全局超时限制。
+        let longestTimeout = max(config.timeout, config.toolTimeouts.values.max() ?? config.timeout)
+        self.init(
+            port: config.port,
+            host: config.host,
+            responseTimeoutMs: longestTimeout + Self.responseTimeoutGraceMs
+        )
+    }
+
     public init(
         port: Int,
         host: String = "127.0.0.1",

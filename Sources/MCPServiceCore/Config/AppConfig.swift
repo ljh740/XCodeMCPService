@@ -68,12 +68,20 @@ public struct ServerConfig: Codable, Sendable, Hashable {
 
 /// 桥接服务配置
 public struct BridgeConfig: Codable, Sendable, Hashable {
+    public static let defaultToolTimeouts: [String: Int] = [
+        "xcode-tools__BuildProject": 2_400_000,
+        "xcode-tools__RunAllTests": 2_400_000,
+        "xcode-tools__RunSomeTests": 2_400_000,
+    ]
+
     /// HTTP 监听端口
     public var port: Int
     /// 监听地址
     public var host: String
     /// 请求超时（毫秒）
     public var timeout: Int
+    /// 按 server__tool 规范名覆盖超时（毫秒）；缺省使用长任务默认值，空表禁用覆盖。
+    public var toolTimeouts: [String: Int]
     /// 启动和重连时获取下游 capabilities 的单次请求超时（毫秒）
     public var capabilityTimeout: Int
     /// 日志级别
@@ -83,18 +91,20 @@ public struct BridgeConfig: Codable, Sendable, Hashable {
         port: Int = 13339,
         host: String = "127.0.0.1",
         timeout: Int = 30000,
+        toolTimeouts: [String: Int] = BridgeConfig.defaultToolTimeouts,
         capabilityTimeout: Int = 15000,
         logLevel: LogLevel = .info
     ) {
         self.port = port
         self.host = host
         self.timeout = timeout
+        self.toolTimeouts = toolTimeouts
         self.capabilityTimeout = capabilityTimeout
         self.logLevel = logLevel
     }
 
     private enum CodingKeys: String, CodingKey {
-        case port, host, timeout, capabilityTimeout, logLevel
+        case port, host, timeout, toolTimeouts, capabilityTimeout, logLevel
     }
 
     public init(from decoder: Decoder) throws {
@@ -102,6 +112,8 @@ public struct BridgeConfig: Codable, Sendable, Hashable {
         port = try container.decodeIfPresent(Int.self, forKey: .port) ?? 13339
         host = try container.decodeIfPresent(String.self, forKey: .host) ?? "127.0.0.1"
         timeout = try container.decodeIfPresent(Int.self, forKey: .timeout) ?? 30000
+        toolTimeouts = try container.decodeIfPresent([String: Int].self, forKey: .toolTimeouts)
+            ?? Self.defaultToolTimeouts
         capabilityTimeout = try container.decodeIfPresent(Int.self, forKey: .capabilityTimeout) ?? 15000
         logLevel = try container.decodeIfPresent(LogLevel.self, forKey: .logLevel) ?? .info
     }
@@ -174,6 +186,14 @@ public struct AppConfig: Codable, Sendable, Hashable {
 
         guard bridge.timeout >= 1000 else {
             throw ConfigValidationError("bridge.timeout must be at least 1000ms, got \(bridge.timeout)")
+        }
+
+        for (tool, timeout) in bridge.toolTimeouts {
+            guard !tool.isEmpty, timeout >= 1000 else {
+                throw ConfigValidationError(
+                    "bridge.toolTimeouts requires non-empty tool names and timeouts of at least 1000ms: \(tool)=\(timeout)"
+                )
+            }
         }
 
         guard bridge.capabilityTimeout >= 1000 else {

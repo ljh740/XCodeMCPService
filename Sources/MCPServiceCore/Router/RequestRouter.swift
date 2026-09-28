@@ -35,6 +35,7 @@ public actor RequestRouter {
     private let clientManager: any StdioClientManaging
     private let aggregator: CapabilityAggregator
     private let timeout: Int
+    private let toolTimeouts: [String: Int]
     private let logger: BridgeLogger
     private var runtimeHealthReporter: (any RuntimeHealthReporting)?
 
@@ -44,11 +45,13 @@ public actor RequestRouter {
         clientManager: any StdioClientManaging,
         aggregator: CapabilityAggregator,
         timeout: Int = 30000,
+        toolTimeouts: [String: Int] = BridgeConfig.defaultToolTimeouts,
         runtimeHealthReporter: (any RuntimeHealthReporting)? = nil
     ) {
         self.clientManager = clientManager
         self.aggregator = aggregator
         self.timeout = timeout
+        self.toolTimeouts = toolTimeouts
         self.logger = bridgeLogger.child(label: "request-router")
         self.runtimeHealthReporter = runtimeHealthReporter
     }
@@ -92,6 +95,7 @@ public actor RequestRouter {
         }
         let requestGeneration = await currentHealthGeneration(serverName: resolved.serverName)
         let logName = resolved.canonicalName
+        let toolTimeout = toolTimeouts[logName] ?? timeout
         let metadata = toolLogMetadata(
             canonicalName: logName,
             requestedName: toolName,
@@ -100,14 +104,14 @@ public actor RequestRouter {
 
         // 带超时调用
         do {
-            let result = try await withTimeout(timeout) {
+            let result = try await withTimeout(toolTimeout) {
                 try await client.callTool(name: resolved.originalName, arguments: args)
             }
             logger.debug("Tool call succeeded", metadata: metadata)
             return .success(ToolCallResult(content: result.content, isError: result.isError))
         } catch is TimeoutError {
             var timeoutMetadata = metadata
-            timeoutMetadata["timeoutMs"] = "\(timeout)"
+            timeoutMetadata["timeoutMs"] = "\(toolTimeout)"
             logger.error("Tool call timed out", metadata: timeoutMetadata)
             reportTimeout(
                 serverName: resolved.serverName,
@@ -116,7 +120,7 @@ public actor RequestRouter {
             )
             return .failure(
                 code: ErrorCodes.timeout,
-                message: "Tool call timed out after \(timeout)ms: \(toolName)"
+                message: "Tool call timed out after \(toolTimeout)ms: \(toolName)"
             )
         } catch {
             var failureMetadata = metadata

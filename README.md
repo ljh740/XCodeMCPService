@@ -113,6 +113,11 @@ mkdir -p ~/Library/Application\ Support/XCodeMCPService
     "port": 13339,
     "host": "127.0.0.1",
     "timeout": 30000,
+    "toolTimeouts": {
+      "xcode-tools__BuildProject": 2400000,
+      "xcode-tools__RunAllTests": 2400000,
+      "xcode-tools__RunSomeTests": 2400000
+    },
     "capabilityTimeout": 15000,
     "logLevel": "info"
   },
@@ -185,8 +190,11 @@ Add to your MCP client configuration:
 | `port` | Int | `13339` | HTTP listen port |
 | `host` | String | `"127.0.0.1"` | Listen address (`127.0.0.1` or `localhost` only) |
 | `timeout` | Int | `30000` | Request timeout (ms) |
+| `toolTimeouts` | {String: Int} | Three overrides shown above | Tool timeout overrides (ms), keyed by `server__tool` canonical name |
 | `capabilityTimeout` | Int | `15000` | Per-category capability timeout during startup and reconnect (ms) |
 | `logLevel` | String | `"info"` | Log level: debug / info / warn / error |
+
+Omitting `toolTimeouts` enables the three 40-minute defaults, including in existing config files. An explicit table replaces those defaults; `{}` disables all overrides. Keys use the configured server name even when a single-server client calls an unprefixed tool. Other tools, resources, and prompts retain `timeout`. Override values must be at least 1000 ms. HTTP waits for the longest configured request timeout plus 5 seconds for the response. Restart the service after changing configuration, and set client tool timeouts to at least 40 minutes for these long tasks.
 
 ### ServerConfig
 

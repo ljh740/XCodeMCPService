@@ -279,6 +279,110 @@ struct RequestRouterTests {
         await server.stop()
     }
 
+    // MARK: - Tool Timeouts
+
+    @Test("Long task defaults apply to public names and canonical aliases", arguments: [
+        "BuildProject", "RunAllTests", "RunSomeTests",
+    ], [false, true])
+    func longTaskTimeoutDefaults(toolName: String, namespaced: Bool) async throws {
+        let mock = MockStdioClientManager()
+        let (client, server) = try await makeToolClient(
+            tools: [ToolFixture(name: toolName, response: "completed")],
+            responseDelayMs: 200
+        )
+        await mock.setConfiguredServers(["xcode-tools"])
+        await mock.addActiveServer("xcode-tools")
+        await mock.setClient(client, forServer: "xcode-tools")
+
+        let aggregator = CapabilityAggregator(clientManager: mock)
+        await aggregator.refresh()
+        let router = RequestRouter(clientManager: mock, aggregator: aggregator, timeout: 50)
+        let result = await router.routeToolCall(
+            toolName: namespaced ? "xcode-tools__\(toolName)" : toolName,
+            args: nil
+        )
+
+        await client.disconnect()
+        await server.stop()
+        #expect(result.success)
+        #expect(result.data?.content == [.text(text: "completed", annotations: nil, _meta: nil)])
+    }
+
+    @Test("Other tools and servers keep the global timeout", arguments: [
+        ("xcode-tools", "GetBuildLog"),
+        ("other-tools", "BuildProject"),
+    ])
+    func otherToolsKeepGlobalTimeout(serverName: String, toolName: String) async throws {
+        let mock = MockStdioClientManager()
+        let (client, server) = try await makeToolClient(
+            tools: [ToolFixture(name: toolName, response: "too late")],
+            responseDelayMs: 200
+        )
+        await mock.setConfiguredServers([serverName])
+        await mock.addActiveServer(serverName)
+        await mock.setClient(client, forServer: serverName)
+
+        let aggregator = CapabilityAggregator(clientManager: mock)
+        await aggregator.refresh()
+        let router = RequestRouter(clientManager: mock, aggregator: aggregator, timeout: 50)
+        let result = await router.routeToolCall(toolName: toolName, args: nil)
+
+        await client.disconnect()
+        await server.stop()
+        #expect(result.error?.code == ErrorCodes.timeout)
+        #expect(result.error?.message == "Tool call timed out after 50ms: \(toolName)")
+    }
+
+    @Test("Configured override controls timeout errors")
+    func configuredToolTimeout() async throws {
+        let mock = MockStdioClientManager()
+        let (client, server) = try await makeToolClient(responseDelayMs: 200)
+        await mock.setConfiguredServers(["xcode-tools"])
+        await mock.addActiveServer("xcode-tools")
+        await mock.setClient(client, forServer: "xcode-tools")
+
+        let aggregator = CapabilityAggregator(clientManager: mock)
+        await aggregator.refresh()
+        let router = RequestRouter(
+            clientManager: mock,
+            aggregator: aggregator,
+            timeout: 5000,
+            toolTimeouts: ["xcode-tools__slow_tool": 50]
+        )
+        let result = await router.routeToolCall(toolName: "slow_tool", args: nil)
+
+        await client.disconnect()
+        await server.stop()
+        #expect(result.error?.code == ErrorCodes.timeout)
+        #expect(result.error?.message == "Tool call timed out after 50ms: slow_tool")
+    }
+
+    @Test("Empty override table disables long task defaults")
+    func emptyToolTimeoutsUseGlobalTimeout() async throws {
+        let mock = MockStdioClientManager()
+        let (client, server) = try await makeToolClient(
+            tools: [ToolFixture(name: "BuildProject", response: "too late")],
+            responseDelayMs: 200
+        )
+        await mock.setConfiguredServers(["xcode-tools"])
+        await mock.addActiveServer("xcode-tools")
+        await mock.setClient(client, forServer: "xcode-tools")
+
+        let aggregator = CapabilityAggregator(clientManager: mock)
+        await aggregator.refresh()
+        let router = RequestRouter(
+            clientManager: mock,
+            aggregator: aggregator,
+            timeout: 50,
+            toolTimeouts: [:]
+        )
+        let result = await router.routeToolCall(toolName: "BuildProject", args: nil)
+
+        await client.disconnect()
+        await server.stop()
+        #expect(result.error?.code == ErrorCodes.timeout)
+    }
+
     // MARK: - Resource Read Tests
 
     @Test("routeResourceRead returns failure for unknown resource")

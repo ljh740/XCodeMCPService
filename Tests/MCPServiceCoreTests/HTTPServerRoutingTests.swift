@@ -5,6 +5,18 @@ import Testing
 
 @Suite("HTTP Routing Tests")
 struct HTTPServerRoutingTests {
+    @Test("HTTP deadline covers the longest configured request plus response grace", arguments: [
+        (BridgeConfig(timeout: 600000), 2_405_000),
+        (BridgeConfig(timeout: 3_000_000), 3_005_000),
+        (BridgeConfig(timeout: 600000, toolTimeouts: [:]), 605000),
+        (BridgeConfig(timeout: 600000, toolTimeouts: ["custom__build": 5_000_000]), 5_005_000),
+        (BridgeConfig(timeout: 600000, toolTimeouts: ["custom__build": 1000]), 605000),
+    ])
+    func responseTimeoutCoversToolOverrides(config: BridgeConfig, expectedTimeout: Int) async {
+        let server = HTTPServer(config: config)
+        #expect(await server.responseTimeoutMs == expectedTimeout)
+    }
+
     @Test("Listener parameters bind to IPv4 loopback before listener creation")
     func listenerParametersBindToLoopback() {
         let parameters = HTTPServer.makeListenerParameters(host: "localhost", port: 13339)

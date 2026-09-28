@@ -40,6 +40,11 @@ struct AppConfigTests {
         #expect(config.port == 13339)
         #expect(config.host == "127.0.0.1")
         #expect(config.timeout == 30000)
+        #expect(config.toolTimeouts == [
+            "xcode-tools__BuildProject": 2_400_000,
+            "xcode-tools__RunAllTests": 2_400_000,
+            "xcode-tools__RunSomeTests": 2_400_000,
+        ])
         #expect(config.capabilityTimeout == 15000)
         #expect(config.logLevel == .info)
     }
@@ -55,6 +60,24 @@ struct AppConfigTests {
         #expect(config.timeout == 60000)
         #expect(config.capabilityTimeout == 7000)
         #expect(config.logLevel == .debug)
+    }
+
+    @Test("Existing config keeps its global timeout and gains long task defaults")
+    func existingConfigLongTaskDefaults() throws {
+        let data = Data(#"{"timeout":600000}"#.utf8)
+        let config = try JSONDecoder().decode(BridgeConfig.self, from: data)
+        #expect(config.timeout == 600000)
+        #expect(config.toolTimeouts == BridgeConfig.defaultToolTimeouts)
+    }
+
+    @Test("Explicit tool timeout table replaces defaults, including an empty table")
+    func explicitToolTimeoutTable() throws {
+        let data = Data(#"{"toolTimeouts":{"custom__BuildProject":900000}}"#.utf8)
+        let config = try JSONDecoder().decode(BridgeConfig.self, from: data)
+        #expect(config.toolTimeouts == ["custom__BuildProject": 900000])
+
+        let empty = try JSONDecoder().decode(BridgeConfig.self, from: Data(#"{"toolTimeouts":{}}"#.utf8))
+        #expect(empty.toolTimeouts.isEmpty)
     }
 
     // MARK: - AppConfig Decoding
@@ -123,6 +146,21 @@ struct AppConfigTests {
         }
     }
 
+    @Test("validate rejects invalid tool timeout entries", arguments: [
+        ["xcode-tools__BuildProject": 0],
+        ["xcode-tools__BuildProject": 999],
+        ["": 2400000],
+    ])
+    func validateInvalidToolTimeouts(toolTimeouts: [String: Int]) {
+        let config = AppConfig(
+            bridge: BridgeConfig(toolTimeouts: toolTimeouts),
+            servers: [ServerConfig(name: "xcode-tools", command: "xcrun")]
+        )
+        #expect(throws: ConfigValidationError.self) {
+            try config.validate()
+        }
+    }
+
     @Test("validate throws on capability timeout below 1000ms")
     func validateLowCapabilityTimeout() {
         let config = AppConfig(
@@ -143,6 +181,7 @@ struct AppConfigTests {
                 port: 9090,
                 host: "127.0.0.1",
                 timeout: 5000,
+                toolTimeouts: ["custom__BuildProject": 900000],
                 capabilityTimeout: 4000,
                 logLevel: .debug
             ),

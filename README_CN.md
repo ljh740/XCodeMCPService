@@ -113,6 +113,11 @@ mkdir -p ~/Library/Application\ Support/XCodeMCPService
     "port": 13339,
     "host": "127.0.0.1",
     "timeout": 30000,
+    "toolTimeouts": {
+      "xcode-tools__BuildProject": 2400000,
+      "xcode-tools__RunAllTests": 2400000,
+      "xcode-tools__RunSomeTests": 2400000
+    },
     "capabilityTimeout": 15000,
     "logLevel": "info"
   },
@@ -185,8 +190,11 @@ CONFIG_PATH=/path/to/config.json "$BIN_DIR/XCodeMCPService"
 | `port` | Int | `13339` | HTTP 监听端口 |
 | `host` | String | `"127.0.0.1"` | 监听地址（仅支持 `127.0.0.1` 或 `localhost`） |
 | `timeout` | Int | `30000` | 请求超时（毫秒） |
+| `toolTimeouts` | {String: Int} | 上例中的三项覆盖 | 按 `server__tool` 规范名配置工具超时（毫秒） |
 | `capabilityTimeout` | Int | `15000` | 启动和重连时获取单类 capability 的超时（毫秒） |
 | `logLevel` | String | `"info"` | 日志级别：debug / info / warn / error |
+
+省略 `toolTimeouts` 时启用三项 40 分钟默认值，旧配置文件也适用。显式配置的表替换默认表；`{}` 禁用所有覆盖。即使单服务器客户端使用无前缀工具名，配置键仍须带上配置中的服务器名。其他工具、资源和提示词继续使用 `timeout`。每项覆盖值至少为 1000 毫秒。HTTP 按最长请求超时额外等待 5 秒，以便回传结果。修改配置后需重启服务，并将客户端工具超时设为至少 40 分钟以支持这些长任务。
 
 ### ServerConfig
 
