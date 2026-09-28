@@ -6,6 +6,7 @@
 "status.reconnecting" = "◐ Reconnecting: %@";
 "status.degraded" = "⚠ Degraded: %@ down";
 "status.error" = "⚠ Error: %@";
+"menu.version" = "Version %@";
 
 /* Menu Actions */
 "menu.start" = "Start Service";

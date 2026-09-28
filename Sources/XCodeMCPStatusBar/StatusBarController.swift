@@ -48,8 +48,8 @@ final class StatusBarController: NSObject {
 
         statusItem.menu = buildMenu()
 
-        // 注册状态变化回调
-        Task {
+        // 注册任务只持有服务，避免异步注册及长期回调延长菜单控制器的生命周期。
+        Task { [bridgeManager, weak self] in
             await bridgeManager.set(onStateChanged: { [weak self] state in
                 Task { @MainActor in
                     self?.updateUI(state: state)
@@ -70,6 +70,20 @@ final class StatusBarController: NSObject {
         statusItem.isEnabled = false
         self.statusMenuItem = statusItem
         menu.addItem(statusItem)
+
+        if let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String {
+            var versionText = version
+            if let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String, build != version {
+                versionText += " (\(build))"
+            }
+            let versionItem = NSMenuItem(
+                title: String(format: L10n("menu.version"), versionText),
+                action: nil,
+                keyEquivalent: ""
+            )
+            versionItem.isEnabled = false
+            menu.addItem(versionItem)
+        }
 
         menu.addItem(.separator())
 

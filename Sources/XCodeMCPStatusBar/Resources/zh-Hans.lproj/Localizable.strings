@@ -6,6 +6,7 @@
 "status.reconnecting" = "◐ 重连中: %@";
 "status.degraded" = "⚠ 降级: %@ 已下线";
 "status.error" = "⚠ 错误: %@";
+"menu.version" = "版本 %@";
 
 /* Menu Actions */
 "menu.start" = "启动服务";
