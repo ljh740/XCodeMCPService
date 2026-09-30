@@ -131,7 +131,7 @@ public actor StdioClientManager: StdioClientManaging {
             logger: Logger(label: "mcp.transport.pipe.\(name)")
         )
 
-        let client = Client(name: "mcp-forward", version: "1.0.10")
+        let client = Client(name: "mcp-forward", version: "1.0.11")
 
         logger.info("Server '\(name)' connecting via MCP client...")
         let connectStart = ContinuousClock.now
