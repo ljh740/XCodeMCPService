@@ -36,6 +36,25 @@ final class DeviceLockEventRecorder: Sendable {
     }
 }
 
+/// 立即放行，相当于构建已完成。
+struct ImmediateDeviceUseGate: DeviceUseGate {
+    func waitUntilDeviceNeeded(workspacePath _: String?, since _: Date) async throws {}
+}
+
+/// 记录收到的 workspace 路径，并一直等待到任务取消，模拟构建尚未结束。
+final class RecordingDeviceUseGate: DeviceUseGate, Sendable {
+    private let paths = Mutex<[String?]>([])
+
+    func waitUntilDeviceNeeded(workspacePath: String?, since _: Date) async throws {
+        paths.withLock { $0.append(workspacePath) }
+        try await Task.sleep(for: .seconds(3600))
+    }
+
+    var workspacePaths: [String?] {
+        paths.withLock { $0 }
+    }
+}
+
 func waitUntil(
     timeout: Duration = .seconds(2),
     _ condition: () -> Bool
@@ -51,11 +70,16 @@ func waitUntil(
 struct DeviceLockMonitorTests {
 
     private func makeMonitor(
-        _ script: [Bool]
+        _ script: [Bool],
+        lockedGracePeriod: Duration = .zero
     ) -> (DeviceLockMonitor, ScriptedLockStateProvider, DeviceLockEventRecorder) {
         let provider = ScriptedLockStateProvider(script)
         let recorder = DeviceLockEventRecorder()
-        let monitor = DeviceLockMonitor(provider: provider, pollInterval: .milliseconds(5)) { event in
+        let monitor = DeviceLockMonitor(
+            provider: provider,
+            pollInterval: .milliseconds(5),
+            lockedGracePeriod: lockedGracePeriod
+        ) { event in
             recorder.append(event)
         }
         return (monitor, provider, recorder)
@@ -102,6 +126,19 @@ struct DeviceLockMonitorTests {
         #expect(DeviceRunDestination.activePhysicalDeviceName(fromListOutput: "Error: no workspace") == nil)
     }
 
+    @Test("workspace path resolves by identifier or single open workspace")
+    func workspacePathParsing() {
+        let one = "* workspaceIdentifier: windowtab-P8RPyr4Sqj, workspacePath: /Users/jie/MTXX/MTXX.xcworkspace"
+        let two = one + "\n* workspaceIdentifier: workspace2, workspacePath: /tmp/Other.xcodeproj"
+
+        #expect(DeviceRunDestination.workspacePath(identifier: "windowtab-P8RPyr4Sqj", fromListOutput: two)
+            == "/Users/jie/MTXX/MTXX.xcworkspace")
+        #expect(DeviceRunDestination.workspacePath(identifier: "workspace2", fromListOutput: two) == "/tmp/Other.xcodeproj")
+        #expect(DeviceRunDestination.workspacePath(identifier: nil, fromListOutput: one) == "/Users/jie/MTXX/MTXX.xcworkspace")
+        #expect(DeviceRunDestination.workspacePath(identifier: nil, fromListOutput: two) == nil)
+        #expect(DeviceRunDestination.workspacePath(identifier: "missing", fromListOutput: two) == nil)
+    }
+
     // MARK: - Monitor
 
     @Test("emits locked once, then cleared after unlock")
@@ -144,6 +181,35 @@ struct DeviceLockMonitorTests {
         try await Task.sleep(for: .milliseconds(50))
         #expect(provider.queries.count <= queriesAfterStop + 1)
         #expect(recorder.events.count == 2)
+    }
+
+    @Test("brief locks shorter than the grace period never alert")
+    func briefLocksIgnored() async throws {
+        // 锁定与解锁交替，每段锁定都远短于宽限期
+        let (monitor, provider, recorder) = makeMonitor(
+            Array(repeating: [true, true, false], count: 20).flatMap { $0 } + [false],
+            lockedGracePeriod: .milliseconds(200)
+        )
+
+        let token = await monitor.register(deviceName: "darkedge")
+        try await waitUntil { provider.queries.count >= 60 }
+        await monitor.unregister(token)
+
+        #expect(recorder.events.isEmpty)
+    }
+
+    @Test("sustained lock alerts only after the grace period")
+    func sustainedLockAlertsAfterGrace() async throws {
+        let (monitor, _, recorder) = makeMonitor([true], lockedGracePeriod: .milliseconds(100))
+
+        let registeredAt = ContinuousClock.now
+        let token = await monitor.register(deviceName: "darkedge")
+        try await waitUntil { !recorder.events.isEmpty }
+        let alertedAfter = ContinuousClock.now - registeredAt
+        await monitor.unregister(token)
+
+        #expect(alertedAfter >= .milliseconds(100))
+        #expect(recorder.events == [.locked(deviceName: "darkedge"), .cleared(deviceName: "darkedge")])
     }
 
     @Test("shutdown clears every locked device")

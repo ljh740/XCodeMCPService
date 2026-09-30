@@ -496,7 +496,8 @@ struct RequestRouterTests {
     private func makeDeviceLockRouter(
         destinationsResponse: String,
         lockScript: [Bool],
-        testDelayMs: Int = 100
+        testDelayMs: Int = 100,
+        deviceUseGate: any DeviceUseGate = ImmediateDeviceUseGate()
     ) async throws -> (
         router: RequestRouter,
         provider: ScriptedLockStateProvider,
@@ -509,6 +510,10 @@ struct RequestRouterTests {
             tools: [
                 ToolFixture(name: "RunSomeTests", response: "tests passed", delayMs: testDelayMs),
                 ToolFixture(name: "XcodeListRunDestinations", response: destinationsResponse),
+                ToolFixture(
+                    name: "XcodeListWorkspaces",
+                    response: "* workspaceIdentifier: windowtab-1, workspacePath: /tmp/MTXX.xcworkspace"
+                ),
             ]
         )
         await mock.setConfiguredServers(["xcode-tools"])
@@ -521,10 +526,14 @@ struct RequestRouterTests {
 
         let provider = ScriptedLockStateProvider(lockScript)
         let recorder = DeviceLockEventRecorder()
-        let monitor = DeviceLockMonitor(provider: provider, pollInterval: .milliseconds(5)) { event in
+        let monitor = DeviceLockMonitor(
+            provider: provider,
+            pollInterval: .milliseconds(5),
+            lockedGracePeriod: .zero
+        ) { event in
             recorder.append(event)
         }
-        await router.setDeviceLockMonitor(monitor)
+        await router.setDeviceLockMonitor(monitor, deviceUseGate: deviceUseGate)
         return (router, provider, recorder, client, server)
     }
 
@@ -564,6 +573,30 @@ struct RequestRouterTests {
         #expect(ContinuousClock.now - cancelledAt < .seconds(1))
         #expect(result.success == false)
         #expect(fixture.recorder.events == [.locked(deviceName: "darkedge"), .cleared(deviceName: "darkedge")])
+
+        await fixture.client.disconnect()
+        await fixture.server.stop()
+    }
+
+    @Test("device lock is not watched while the build is still running")
+    func buildPhaseNotWatched() async throws {
+        let destinations = #"{"destinations":[{"displayTitle":"darkedge","isActive":true,"isSimulator":false,"isGenericDevice":false,"platformIdentifier":"com.apple.platform.iphoneos"}]}"#
+        let gate = RecordingDeviceUseGate()
+        let fixture = try await makeDeviceLockRouter(
+            destinationsResponse: destinations,
+            lockScript: [true],
+            deviceUseGate: gate
+        )
+
+        let result = await fixture.router.routeToolCall(
+            toolName: "RunSomeTests",
+            args: ["tests": [], "workspaceIdentifier": "windowtab-1"]
+        )
+
+        #expect(result.success)
+        #expect(gate.workspacePaths == ["/tmp/MTXX.xcworkspace"])
+        #expect(fixture.provider.queries.isEmpty)
+        #expect(fixture.recorder.events.isEmpty)
 
         await fixture.client.disconnect()
         await fixture.server.stop()

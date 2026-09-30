@@ -39,6 +39,7 @@ public actor RequestRouter {
     private let logger: BridgeLogger
     private var runtimeHealthReporter: (any RuntimeHealthReporting)?
     private var deviceLockMonitor: DeviceLockMonitor?
+    private var deviceUseGate: any DeviceUseGate = DerivedDataBuildGate()
     /// 查询运行目标的超时，避免拖慢真正的工具调用
     private let destinationLookupTimeoutMs = 3000
 
@@ -63,8 +64,12 @@ public actor RequestRouter {
         self.runtimeHealthReporter = reporter
     }
 
-    public func setDeviceLockMonitor(_ monitor: DeviceLockMonitor?) {
+    public func setDeviceLockMonitor(
+        _ monitor: DeviceLockMonitor?,
+        deviceUseGate: any DeviceUseGate = DerivedDataBuildGate()
+    ) {
         self.deviceLockMonitor = monitor
+        self.deviceUseGate = deviceUseGate
     }
 
     // MARK: - Route: Tool Call
@@ -101,7 +106,7 @@ public actor RequestRouter {
             )
         }
 
-        let lockWatchToken = await registerDeviceLockWatch(
+        let lockWatch = await startDeviceLockWatch(
             originalToolName: resolved.originalName,
             args: args,
             client: client
@@ -112,8 +117,11 @@ public actor RequestRouter {
             args: args,
             client: client
         )
-        if let lockWatchToken, let deviceLockMonitor {
-            await deviceLockMonitor.unregister(lockWatchToken)
+        if let lockWatch {
+            lockWatch.cancel()
+            if let token = await lockWatch.value, let deviceLockMonitor {
+                await deviceLockMonitor.unregister(token)
+            }
         }
         return result
     }
@@ -312,47 +320,72 @@ public actor RequestRouter {
 
     // MARK: - Private: Device Lock Watch
 
-    /// 需要真机的工具调用前，查询 Xcode 活跃运行目标；是真机时开始关注其锁屏状态。
-    private func registerDeviceLockWatch(
+    /// 需要真机的工具调用前，查询 Xcode 活跃运行目标与 workspace 路径；目标是真机时，
+    /// 返回与调用并行的任务：等到构建完成、Xcode 真正需要设备后才开始关注锁屏状态。
+    ///
+    /// 查询在转发前完成，避免排在长时间运行的调用之后；返回任务的结果为 `unregister` 用的 token。
+    private func startDeviceLockWatch(
         originalToolName: String,
         args: [String: Value]?,
         client: Client
-    ) async -> UUID? {
+    ) async -> Task<UUID?, Never>? {
         guard let deviceLockMonitor,
             DeviceRunDestination.watchedToolNames.contains(originalToolName)
         else {
             return nil
         }
 
+        let since = Date()
         // 与本次调用指向同一 workspace，才能拿到同一个运行目标
-        let listArgs = args?["workspaceIdentifier"].map { ["workspaceIdentifier": $0] } ?? [:]
+        let workspaceArg = args?["workspaceIdentifier"]
+        let listArgs = workspaceArg.map { ["workspaceIdentifier": $0] } ?? [:]
+        guard let destinations = await callListTool(DeviceRunDestination.listToolName, args: listArgs, client: client),
+            let deviceName = DeviceRunDestination.activePhysicalDeviceName(fromListOutput: destinations)
+        else {
+            return nil
+        }
 
+        // 标识可以直接是路径；否则通过 workspace 列表换算，失败时由 gate 退化为立即关注
+        let workspaceIdentifier = workspaceArg?.stringValue
+        var workspacePath = workspaceIdentifier.flatMap { $0.hasPrefix("/") ? $0 : nil }
+        if workspacePath == nil,
+            let workspaces = await callListTool(DeviceRunDestination.listWorkspacesToolName, args: [:], client: client)
+        {
+            workspacePath = DeviceRunDestination.workspacePath(identifier: workspaceIdentifier, fromListOutput: workspaces)
+        }
+
+        logger.debug("Watching device lock state after build completes", metadata: [
+            "tool": originalToolName,
+            "device": deviceName,
+            "workspace": workspacePath ?? "unknown",
+        ])
+        let gate = deviceUseGate
+        return Task { [workspacePath] in
+            do {
+                try await gate.waitUntilDeviceNeeded(workspacePath: workspacePath, since: since)
+            } catch {
+                // 只会因调用结束、任务被取消而抛出：构建未完成，无需关注
+                return nil
+            }
+            return await deviceLockMonitor.register(deviceName: deviceName)
+        }
+    }
+
+    /// 调用上游查询类工具，返回第一段文本；失败或超时返回 nil。
+    private func callListTool(_ name: String, args: [String: Value], client: Client) async -> String? {
         do {
             let logger = self.logger
             let result = try await withTimeout(destinationLookupTimeoutMs) {
-                try await Self.callToolCancellable(
-                    client: client,
-                    name: DeviceRunDestination.listToolName,
-                    args: listArgs,
-                    logger: logger
-                )
+                try await Self.callToolCancellable(client: client, name: name, args: args, logger: logger)
             }
-            guard result.isError != true,
-                let deviceName = result.content.lazy.compactMap({ content -> String? in
-                    guard case .text(let text, _, _) = content else { return nil }
-                    return DeviceRunDestination.activePhysicalDeviceName(fromListOutput: text)
-                }).first
-            else {
-                return nil
-            }
-            logger.debug("Watching device lock state", metadata: [
-                "tool": originalToolName,
-                "device": deviceName,
-            ])
-            return await deviceLockMonitor.register(deviceName: deviceName)
+            guard result.isError != true else { return nil }
+            return result.content.lazy.compactMap { content -> String? in
+                guard case .text(let text, _, _) = content else { return nil }
+                return text
+            }.first
         } catch {
-            logger.debug("Run destination lookup failed, skipping device lock watch", metadata: [
-                "tool": originalToolName,
+            logger.debug("Device lock lookup failed", metadata: [
+                "tool": name,
                 "error": "\(error)",
             ])
             return nil

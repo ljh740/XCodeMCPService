@@ -49,7 +49,7 @@ xcrun mcp-server status
 - **会话管理** — 每个客户端独立会话，安全 token 标识
 - **进程生命周期** — 崩溃检测 + 指数退避自动重启
 - **macOS 状态栏应用** — 可视化服务状态，一键启停
-- **真机解锁提醒** — `RunAllTests` / `RunSomeTests` / `RunProject` 目标为真机时，通过 `devicectl` 轮询锁屏状态；设备锁定期间，状态栏应用在每块屏幕上持续显示仿 Apple Intelligence 的边缘流光和抖动提示，直到解锁或调用结束、被取消
+- **真机解锁提醒** — `RunAllTests` / `RunSomeTests` / `RunProject` 目标为真机时，等构建完成（DerivedData 出现新的构建日志）后再通过 `devicectl` 轮询锁屏状态；设备持续锁定 30 秒后，状态栏应用在每块屏幕上持续显示仿 Apple Intelligence 的边缘流光和抖动提示，直到解锁或调用结束、被取消
 
 ## 系统要求
 

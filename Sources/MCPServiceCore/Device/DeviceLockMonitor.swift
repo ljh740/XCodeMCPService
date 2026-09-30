@@ -129,6 +129,30 @@ enum DeviceRunDestination {
     /// 查询运行目标的上游工具。
     static let listToolName = "XcodeListRunDestinations"
 
+    /// 列出已打开 workspace 的上游工具。
+    static let listWorkspacesToolName = "XcodeListWorkspaces"
+
+    /// 解析 `XcodeListWorkspaces` 的文本，得到指定 workspace 的路径；
+    /// 未指定标识时仅在唯一打开的 workspace 下返回其路径。
+    static func workspacePath(identifier: String?, fromListOutput text: String) -> String? {
+        let entries: [(identifier: String, path: String)] = text
+            .split(whereSeparator: \.isNewline)
+            .compactMap { line in
+                guard let idRange = line.range(of: "workspaceIdentifier: "),
+                    let pathRange = line.range(of: ", workspacePath: ")
+                else {
+                    return nil
+                }
+                let identifier = String(line[idRange.upperBound..<pathRange.lowerBound])
+                let path = String(line[pathRange.upperBound...]).trimmingCharacters(in: .whitespaces)
+                return (identifier, path)
+            }
+        guard let identifier else {
+            return entries.count == 1 ? entries[0].path : nil
+        }
+        return entries.first { $0.identifier == identifier }?.path
+    }
+
     /// 解析 `XcodeListRunDestinations` 的 JSON 文本，活跃目标是 iOS 系真机时返回其名称。
     static func activePhysicalDeviceName(fromListOutput text: String) -> String? {
         struct Payload: Decodable {
@@ -157,7 +181,10 @@ enum DeviceRunDestination {
 
 // MARK: - DeviceLockMonitor
 
-/// 在工具调用期间轮询真机锁屏状态，只在状态翻转时发出事件。
+/// 在工具调用期间轮询真机锁屏状态，设备持续锁定超过宽限期才发出 `locked`。
+///
+/// 测试在真机上正常执行时，devicectl 也会短暂报告锁定（实测连续不超过约 16 秒），
+/// 只有持续锁定才说明 Xcode 在等待解锁；任一次读到解锁即重新计时并回收提醒。
 ///
 /// 同一设备的多个并发调用共享一个轮询任务；最后一个调用结束时停止轮询，
 /// 若此前报告过锁定则补发 `cleared`，保证上层提醒总能被回收。
@@ -170,20 +197,26 @@ public actor DeviceLockMonitor {
 
     private let provider: any DeviceLockStateProviding
     private let pollInterval: Duration
+    private let lockedGracePeriod: Duration
     private let onEvent: @Sendable (DeviceLockEvent) -> Void
     private let logger: BridgeLogger
 
     private var watchers: [UUID: String] = [:]
     private var pollers: [String: Poller] = [:]
-    private var lockedDevices: Set<String> = []
+    /// 设备本轮连续锁定的起始时间
+    private var lockedSince: [String: ContinuousClock.Instant] = [:]
+    /// 已发出 `locked` 的设备
+    private var alertedDevices: Set<String> = []
 
     public init(
         provider: any DeviceLockStateProviding = DevicectlLockStateProvider(),
         pollInterval: Duration = .seconds(3),
+        lockedGracePeriod: Duration = .seconds(30),
         onEvent: @escaping @Sendable (DeviceLockEvent) -> Void
     ) {
         self.provider = provider
         self.pollInterval = pollInterval
+        self.lockedGracePeriod = lockedGracePeriod
         self.onEvent = onEvent
         self.logger = bridgeLogger.child(label: "device-lock-monitor")
     }
@@ -220,7 +253,8 @@ public actor DeviceLockMonitor {
 
     private func stopPolling(deviceName: String) {
         pollers.removeValue(forKey: deviceName)?.task.cancel()
-        if lockedDevices.remove(deviceName) != nil {
+        lockedSince.removeValue(forKey: deviceName)
+        if alertedDevices.remove(deviceName) != nil {
             onEvent(.cleared(deviceName: deviceName))
         }
     }
@@ -246,11 +280,19 @@ public actor DeviceLockMonitor {
         guard pollers[deviceName]?.id == pollerID else { return }
 
         if locked {
-            guard lockedDevices.insert(deviceName).inserted else { return }
+            let now = ContinuousClock.now
+            let since = lockedSince[deviceName] ?? now
+            lockedSince[deviceName] = since
+            guard now - since >= lockedGracePeriod,
+                alertedDevices.insert(deviceName).inserted
+            else {
+                return
+            }
             logger.warning("Device is locked, waiting for unlock", metadata: ["device": deviceName])
             onEvent(.locked(deviceName: deviceName))
         } else {
-            guard lockedDevices.remove(deviceName) != nil else { return }
+            lockedSince.removeValue(forKey: deviceName)
+            guard alertedDevices.remove(deviceName) != nil else { return }
             logger.info("Device unlocked", metadata: ["device": deviceName])
             onEvent(.cleared(deviceName: deviceName))
         }
