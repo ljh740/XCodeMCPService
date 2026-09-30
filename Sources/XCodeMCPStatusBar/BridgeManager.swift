@@ -93,6 +93,14 @@ public actor BridgeManager {
         self.onStateChanged = callback
     }
 
+    /// 真机锁屏事件回调，用于发出和回收解锁提醒
+    private var onDeviceLockEvent: (@Sendable (DeviceLockEvent) -> Void)?
+
+    /// 设置真机锁屏事件回调
+    public func set(onDeviceLockEvent callback: (@Sendable (DeviceLockEvent) -> Void)?) {
+        self.onDeviceLockEvent = callback
+    }
+
     // MARK: - Init
 
     public init(configPath: String? = nil) {
@@ -129,6 +137,7 @@ public actor BridgeManager {
         await bridge.setLifecycleEventHandler { event in
             continuation.yield(event)
         }
+        await bridge.setDeviceLockEventHandler(onDeviceLockEvent)
 
         do {
             try await bridge.start()

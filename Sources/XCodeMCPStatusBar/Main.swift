@@ -11,6 +11,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private var bridgeManager: BridgeManager!
     private var statusBarController: StatusBarController!
+    private let deviceLockNotifier = DeviceLockNotifier()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         // 初始化服务管理器
@@ -22,7 +23,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusBarController.setup()
 
         // 自动启动服务
+        let deviceLockNotifier = self.deviceLockNotifier
         Task {
+            await bridgeManager.set(onDeviceLockEvent: { event in
+                deviceLockNotifier.send(event)
+            })
             await bridgeManager.start()
         }
     }

@@ -22,3 +22,8 @@
 "config.address" = "Address: %@:%d";
 "config.noServers" = "No configured servers";
 "config.servers.count" = "Servers (%d):";
+
+/* Device Lock Notification */
+"deviceLock.title" = "Unlock %@";
+"deviceLock.body" = "An Xcode task is waiting for the device. Unlock it to continue.";
+"deviceLock.dismiss" = "Hide";

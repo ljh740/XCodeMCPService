@@ -8,6 +8,7 @@ struct RequestRouterTests {
     struct ToolFixture: Sendable {
         let name: String
         let response: String
+        var delayMs = 0
     }
 
     actor TimeoutReportProbe: RuntimeHealthReporting {
@@ -75,11 +76,12 @@ struct RequestRouterTests {
             return ListTools.Result(tools: listedTools, nextCursor: nil)
         }
         await server.withMethodHandler(CallTool.self) { params in
-            if responseDelayMs > 0 {
-                try await Task.sleep(for: .milliseconds(responseDelayMs))
+            let fixture = tools.first(where: { $0.name == params.name })
+            let delayMs = max(responseDelayMs, fixture?.delayMs ?? 0)
+            if delayMs > 0 {
+                try await Task.sleep(for: .milliseconds(delayMs))
             }
-            let response = tools.first(where: { $0.name == params.name })?.response ?? "done"
-            return CallTool.Result(content: [.text(response)], isError: false)
+            return CallTool.Result(content: [.text(fixture?.response ?? "done")], isError: false)
         }
 
         try await server.start(transport: serverTransport)
@@ -487,5 +489,113 @@ struct RequestRouterTests {
         #expect(result.data == nil)
         #expect(result.error?.code == ErrorCodes.serverNotFound)
         #expect(result.error?.message == "not found")
+    }
+
+    // MARK: - Device Lock Watch
+
+    private func makeDeviceLockRouter(
+        destinationsResponse: String,
+        lockScript: [Bool],
+        testDelayMs: Int = 100
+    ) async throws -> (
+        router: RequestRouter,
+        provider: ScriptedLockStateProvider,
+        recorder: DeviceLockEventRecorder,
+        client: Client,
+        server: Server
+    ) {
+        let mock = MockStdioClientManager()
+        let (client, server) = try await makeToolClient(
+            tools: [
+                ToolFixture(name: "RunSomeTests", response: "tests passed", delayMs: testDelayMs),
+                ToolFixture(name: "XcodeListRunDestinations", response: destinationsResponse),
+            ]
+        )
+        await mock.setConfiguredServers(["xcode-tools"])
+        await mock.addActiveServer("xcode-tools")
+        await mock.setClient(client, forServer: "xcode-tools")
+
+        let aggregator = CapabilityAggregator(clientManager: mock)
+        await aggregator.refresh()
+        let router = RequestRouter(clientManager: mock, aggregator: aggregator, timeout: 5000)
+
+        let provider = ScriptedLockStateProvider(lockScript)
+        let recorder = DeviceLockEventRecorder()
+        let monitor = DeviceLockMonitor(provider: provider, pollInterval: .milliseconds(5)) { event in
+            recorder.append(event)
+        }
+        await router.setDeviceLockMonitor(monitor)
+        return (router, provider, recorder, client, server)
+    }
+
+    @Test("test tool on locked physical device emits locked and clears when call ends")
+    func deviceLockWatchedDuringTestCall() async throws {
+        let destinations = #"{"destinations":[{"displayTitle":"darkedge","isActive":true,"isSimulator":false,"isGenericDevice":false,"platformIdentifier":"com.apple.platform.iphoneos"}]}"#
+        let fixture = try await makeDeviceLockRouter(destinationsResponse: destinations, lockScript: [true])
+
+        let result = await fixture.router.routeToolCall(toolName: "RunSomeTests", args: ["tests": []])
+
+        #expect(result.success)
+        #expect(fixture.provider.queries.first == "darkedge")
+        #expect(fixture.recorder.events == [.locked(deviceName: "darkedge"), .cleared(deviceName: "darkedge")])
+
+        await fixture.client.disconnect()
+        await fixture.server.stop()
+    }
+
+    @Test("cancelling a watched call returns promptly and clears the lock reminder")
+    func cancelledCallClearsDeviceLock() async throws {
+        let destinations = #"{"destinations":[{"displayTitle":"darkedge","isActive":true,"isSimulator":false,"isGenericDevice":false,"platformIdentifier":"com.apple.platform.iphoneos"}]}"#
+        let fixture = try await makeDeviceLockRouter(
+            destinationsResponse: destinations,
+            lockScript: [true],
+            testDelayMs: 10_000
+        )
+
+        let call = Task {
+            await fixture.router.routeToolCall(toolName: "RunSomeTests", args: ["tests": []])
+        }
+        try await waitUntil { fixture.recorder.events == [.locked(deviceName: "darkedge")] }
+
+        let cancelledAt = ContinuousClock.now
+        call.cancel()
+        let result = await call.value
+
+        #expect(ContinuousClock.now - cancelledAt < .seconds(1))
+        #expect(result.success == false)
+        #expect(fixture.recorder.events == [.locked(deviceName: "darkedge"), .cleared(deviceName: "darkedge")])
+
+        await fixture.client.disconnect()
+        await fixture.server.stop()
+    }
+
+    @Test("test tool on simulator does not query device lock state")
+    func simulatorDestinationNotWatched() async throws {
+        let destinations = #"{"destinations":[{"displayTitle":"iPhone 17","isActive":true,"isSimulator":true,"isGenericDevice":false,"platformIdentifier":"com.apple.platform.iphonesimulator"}]}"#
+        let fixture = try await makeDeviceLockRouter(destinationsResponse: destinations, lockScript: [true])
+
+        let result = await fixture.router.routeToolCall(toolName: "RunSomeTests", args: ["tests": []])
+
+        #expect(result.success)
+        #expect(fixture.provider.queries.isEmpty)
+        #expect(fixture.recorder.events.isEmpty)
+
+        await fixture.client.disconnect()
+        await fixture.server.stop()
+    }
+
+    @Test("non-device tools skip run destination lookup")
+    func nonDeviceToolNotWatched() async throws {
+        let destinations = #"{"destinations":[{"displayTitle":"darkedge","isActive":true,"isSimulator":false,"isGenericDevice":false,"platformIdentifier":"com.apple.platform.iphoneos"}]}"#
+        let fixture = try await makeDeviceLockRouter(destinationsResponse: destinations, lockScript: [true])
+
+        let result = await fixture.router.routeToolCall(toolName: "XcodeListRunDestinations", args: nil)
+
+        #expect(result.success)
+        #expect(fixture.provider.queries.isEmpty)
+        #expect(fixture.recorder.events.isEmpty)
+
+        await fixture.client.disconnect()
+        await fixture.server.stop()
     }
 }

@@ -49,6 +49,7 @@ xcrun mcp-server status
 - **Session management** — Independent session per client with secure token identification
 - **Process lifecycle** — Crash detection + exponential backoff auto-restart
 - **macOS status bar app** — Visual service status, one-click start/stop
+- **Device unlock reminder** — While `RunAllTests` / `RunSomeTests` / `RunProject` target a physical device, the service polls its lock state via `devicectl`; while the device is locked, the status bar app shows an Apple Intelligence–style glowing edge and a shaking reminder on every display until the device is unlocked or the call ends or is cancelled
 
 ## Requirements
 

@@ -22,3 +22,8 @@
 "config.address" = "地址: %@:%d";
 "config.noServers" = "无已配置服务器";
 "config.servers.count" = "服务器 (%d):";
+
+/* Device Lock Notification */
+"deviceLock.title" = "请解锁 %@";
+"deviceLock.body" = "Xcode 任务正在等待该设备，解锁后继续执行。";
+"deviceLock.dismiss" = "隐藏";

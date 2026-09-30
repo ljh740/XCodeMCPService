@@ -38,6 +38,9 @@ public actor RequestRouter {
     private let toolTimeouts: [String: Int]
     private let logger: BridgeLogger
     private var runtimeHealthReporter: (any RuntimeHealthReporting)?
+    private var deviceLockMonitor: DeviceLockMonitor?
+    /// 查询运行目标的超时，避免拖慢真正的工具调用
+    private let destinationLookupTimeoutMs = 3000
 
     // MARK: - Init
 
@@ -58,6 +61,10 @@ public actor RequestRouter {
 
     public func setRuntimeHealthReporter(_ reporter: (any RuntimeHealthReporting)?) {
         self.runtimeHealthReporter = reporter
+    }
+
+    public func setDeviceLockMonitor(_ monitor: DeviceLockMonitor?) {
+        self.deviceLockMonitor = monitor
     }
 
     // MARK: - Route: Tool Call
@@ -93,6 +100,31 @@ public actor RequestRouter {
                 message: "Server not running: \(resolved.serverName)"
             )
         }
+
+        let lockWatchToken = await registerDeviceLockWatch(
+            originalToolName: resolved.originalName,
+            args: args,
+            client: client
+        )
+        let result = await forwardToolCall(
+            resolved: resolved,
+            requestedName: toolName,
+            args: args,
+            client: client
+        )
+        if let lockWatchToken, let deviceLockMonitor {
+            await deviceLockMonitor.unregister(lockWatchToken)
+        }
+        return result
+    }
+
+    /// 带超时转发 tool 调用到下游 client
+    private func forwardToolCall(
+        resolved: ResolvedName,
+        requestedName toolName: String,
+        args: [String: Value]?,
+        client: Client
+    ) async -> RouteResult<ToolCallResult> {
         let requestGeneration = await currentHealthGeneration(serverName: resolved.serverName)
         let logName = resolved.canonicalName
         let toolTimeout = toolTimeouts[logName] ?? timeout
@@ -104,8 +136,9 @@ public actor RequestRouter {
 
         // 带超时调用
         do {
+            let logger = self.logger
             let result = try await withTimeout(toolTimeout) {
-                try await client.callTool(name: resolved.originalName, arguments: args)
+                try await Self.callToolCancellable(client: client, name: resolved.originalName, args: args, logger: logger)
             }
             logger.debug("Tool call succeeded", metadata: metadata)
             return .success(ToolCallResult(content: result.content, isError: result.isError))
@@ -248,6 +281,81 @@ public actor RequestRouter {
                 code: ErrorCodes.bridgeError,
                 message: "Prompt get failed: \(error)"
             )
+        }
+    }
+
+    /// 调用下游 tool；所在任务被取消（客户端取消或超时）时立即结束等待，并通知下游取消该请求。
+    ///
+    /// SDK 的 `callTool` 等待不响应任务取消，直接使用会一直等到下游自行返回。
+    private static func callToolCancellable(
+        client: Client,
+        name: String,
+        args: [String: Value]?,
+        logger: BridgeLogger
+    ) async throws -> CallTool.Result {
+        let context: RequestContext<CallTool.Result> = try await client.callTool(name: name, arguments: args)
+        return try await withTaskCancellationHandler {
+            try await context.value
+        } onCancel: {
+            Task {
+                do {
+                    try await client.cancelRequest(context.requestID, reason: "Request cancelled by bridge")
+                } catch {
+                    logger.warning("Failed to notify downstream cancellation", metadata: [
+                        "tool": name,
+                        "error": "\(error)",
+                    ])
+                }
+            }
+        }
+    }
+
+    // MARK: - Private: Device Lock Watch
+
+    /// 需要真机的工具调用前，查询 Xcode 活跃运行目标；是真机时开始关注其锁屏状态。
+    private func registerDeviceLockWatch(
+        originalToolName: String,
+        args: [String: Value]?,
+        client: Client
+    ) async -> UUID? {
+        guard let deviceLockMonitor,
+            DeviceRunDestination.watchedToolNames.contains(originalToolName)
+        else {
+            return nil
+        }
+
+        // 与本次调用指向同一 workspace，才能拿到同一个运行目标
+        let listArgs = args?["workspaceIdentifier"].map { ["workspaceIdentifier": $0] } ?? [:]
+
+        do {
+            let logger = self.logger
+            let result = try await withTimeout(destinationLookupTimeoutMs) {
+                try await Self.callToolCancellable(
+                    client: client,
+                    name: DeviceRunDestination.listToolName,
+                    args: listArgs,
+                    logger: logger
+                )
+            }
+            guard result.isError != true,
+                let deviceName = result.content.lazy.compactMap({ content -> String? in
+                    guard case .text(let text, _, _) = content else { return nil }
+                    return DeviceRunDestination.activePhysicalDeviceName(fromListOutput: text)
+                }).first
+            else {
+                return nil
+            }
+            logger.debug("Watching device lock state", metadata: [
+                "tool": originalToolName,
+                "device": deviceName,
+            ])
+            return await deviceLockMonitor.register(deviceName: deviceName)
+        } catch {
+            logger.debug("Run destination lookup failed, skipping device lock watch", metadata: [
+                "tool": originalToolName,
+                "error": "\(error)",
+            ])
+            return nil
         }
     }
 

@@ -42,12 +42,16 @@ public actor BridgeServer {
     private var router: RequestRouter?
     private var httpServer: HTTPServer?
     private var lifecycleManager: ProcessLifecycleManager?
+    private var deviceLockMonitor: DeviceLockMonitor?
 
     private var running = false
     private let logger: BridgeLogger
 
     /// 生命周期事件回调，供上层（BridgeManager）监听重连状态
     private var onLifecycleEvent: (@Sendable (LifecycleEvent) -> Void)?
+
+    /// 真机锁屏事件回调，供上层（BridgeManager）发出或回收解锁提醒
+    private var onDeviceLockEvent: (@Sendable (DeviceLockEvent) -> Void)?
 
     // MARK: - Init
 
@@ -65,6 +69,11 @@ public actor BridgeServer {
     /// 设置生命周期事件回调
     public func setLifecycleEventHandler(_ handler: (@Sendable (LifecycleEvent) -> Void)?) {
         self.onLifecycleEvent = handler
+    }
+
+    /// 设置真机锁屏事件回调
+    public func setDeviceLockEventHandler(_ handler: (@Sendable (DeviceLockEvent) -> Void)?) {
+        self.onDeviceLockEvent = handler
     }
 
     /// 启动桥接服务器
@@ -136,6 +145,14 @@ public actor BridgeServer {
         )
         self.router = router
 
+        // 需要真机的工具调用期间关注锁屏状态
+        let deviceLockEventHandler = self.onDeviceLockEvent
+        let deviceLockMonitor = DeviceLockMonitor { event in
+            deviceLockEventHandler?(event)
+        }
+        await router.setDeviceLockMonitor(deviceLockMonitor)
+        self.deviceLockMonitor = deviceLockMonitor
+
         // 7. 创建 HTTPServer
         let httpServer = HTTPServer(config: config.bridge)
         self.httpServer = httpServer
@@ -183,6 +200,7 @@ public actor BridgeServer {
             await httpServer.stop()
             await clientManager.stopAll()
             self.httpServer = nil
+            self.deviceLockMonitor = nil
             self.router = nil
             self.aggregator = nil
             self.clientManager = nil
@@ -292,8 +310,14 @@ public actor BridgeServer {
             await clientManager.stopAll()
         }
 
+        // 回收仍在显示的锁屏提醒
+        if let deviceLockMonitor {
+            await deviceLockMonitor.shutdown()
+        }
+
         // 4. 清空所有引用
         self.lifecycleManager = nil
+        self.deviceLockMonitor = nil
         self.httpServer = nil
         self.router = nil
         self.aggregator = nil
