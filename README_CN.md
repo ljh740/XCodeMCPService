@@ -135,7 +135,7 @@ mkdir -p ~/Library/Application\ Support/XCodeMCPService
 
 保存为 `~/Library/Application Support/XCodeMCPService/config.json`。
 
-> 不创建配置文件时，服务会使用内置默认配置（端口 13339，自动启动 `xcrun mcpbridge`）。服务会优先选择当前运行的唯一 Xcode；多实例时优先当前活跃或 `xcode-select` 选中的安装。Xcode 27 的 headless MCP 已启用时，服务优先使用该连接，并刻意不设置 `MCP_XCODE_PID`，让 agent 授权在“重启服务”后继续有效。旧版 Xcode 或未启用 headless 模式的 Xcode 27 才绑定检测到的 GUI 进程。可通过 server 的 `env.DEVELOPER_DIR` 或 `env.MCP_XCODE_PID` 显式覆盖。首次启动时自动写入默认路径。
+> 不创建配置文件时，服务会使用内置默认配置（端口 13339，自动启动 `xcrun mcpbridge`）。服务会优先选择当前运行的唯一 Xcode；多实例时优先当前活跃或 `xcode-select` 选中的安装。Xcode 27 的 headless MCP 已启用时，服务优先使用该连接，并刻意不设置 `MCP_XCODE_PID`，让 agent 授权在“重启服务”后继续有效。旧版 Xcode 或未启用 headless 模式的 Xcode 27 才绑定检测到的 GUI 进程。Xcode 启动或退出后，服务会重新解析绑定，只重启 Xcode 或连接方式发生变化的 server，并等待进行中的工具调用（如构建、测试）结束后再切换；状态栏菜单也可单独重启某个 server。可通过 server 的 `env.DEVELOPER_DIR` 或 `env.MCP_XCODE_PID` 显式覆盖，显式覆盖时不会自动切换。首次启动时自动写入默认路径。
 
 Xcode 27 的 headless MCP 只需针对当前选中的 Xcode 启用一次：
 

@@ -180,6 +180,16 @@ public actor BridgeManager {
         await start()
     }
 
+    /// 重启单个 server，进度通过生命周期事件反映到状态
+    public func restartServer(name: String) async {
+        guard state.canStop, let bridge else { return }
+        let outcome = await bridge.restartServer(name: name)
+        logger.info("Server restart requested from menu", metadata: [
+            "server": name,
+            "outcome": "\(outcome)",
+        ])
+    }
+
     // MARK: - Query
 
     /// 获取当前服务状态

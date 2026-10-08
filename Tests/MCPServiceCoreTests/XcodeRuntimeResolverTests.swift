@@ -429,6 +429,114 @@ struct XcodeRuntimeResolverTests {
         #expect(launch.metadata["xcodeVersion"] == "27.0")
     }
 
+    @Test("Launching another Xcode after an xcode-select fallback changes the automatic binding")
+    func xcodeSwitchChangesAutomaticBinding() async throws {
+        let beta = try makeFixture(name: "Xcode-27.1.0-Beta.app", version: "27.1", build: "27A9269", headless: true)
+        let candidate = try makeFixture(
+            name: "Xcode-27.1.0-Release.Candidate.app",
+            version: "27.1",
+            build: "27A9275",
+            headless: true
+        )
+        defer {
+            removeFixture(beta)
+            removeFixture(candidate)
+        }
+        let statusProvider = StaticXcodeMCPServerStatusProvider(
+            value: XcodeMCPServerStatus(enabled: true, running: false)
+        )
+        let config = ServerConfig(name: "xcode-tools", command: "xcrun", args: ["mcpbridge"])
+
+        // 旧 Xcode 退出后的自动重启：无运行中的 Xcode，回退到仍指向 Beta 的 xcode-select。
+        let fallbackLaunch = try await DefaultServerLaunchResolver(
+            xcodeRuntimeResolver: makeResolver(running: [], selected: beta.developerDirectoryURL),
+            xcodeMCPServerStatusProvider: statusProvider
+        ).resolve(config: config, environment: ["PATH": "/usr/bin"])
+
+        // 新 Xcode 启动后重新解析，应选中正在运行的 RC。
+        let switchedResolver = DefaultServerLaunchResolver(
+            xcodeRuntimeResolver: makeResolver(
+                running: [RunningXcodeApplication(
+                    applicationURL: candidate.applicationURL,
+                    isActive: true,
+                    processIdentifier: 93325
+                )],
+                selected: beta.developerDirectoryURL
+            ),
+            xcodeMCPServerStatusProvider: statusProvider
+        )
+        let switchedLaunch = try await switchedResolver.resolve(config: config, environment: ["PATH": "/usr/bin"])
+        let repeatedLaunch = try await switchedResolver.resolve(config: config, environment: ["PATH": "/usr/bin"])
+
+        let fallbackBinding = try #require(fallbackLaunch.automaticXcodeBinding)
+        let switchedBinding = try #require(switchedLaunch.automaticXcodeBinding)
+        #expect(fallbackBinding.xcodePath == beta.applicationURL.resolvingSymlinksInPath().path)
+        #expect(switchedBinding.xcodePath == candidate.applicationURL.resolvingSymlinksInPath().path)
+        #expect(switchedBinding.connection == "headless-mcp-server")
+        #expect(fallbackBinding != switchedBinding)
+        #expect(repeatedLaunch.automaticXcodeBinding == switchedBinding)
+    }
+
+    @Test("Explicit DEVELOPER_DIR or MCP_XCODE_PID opts out of automatic Xcode switching")
+    func explicitConfigurationHasNoAutomaticBinding() async throws {
+        let beta = try makeFixture(name: "Xcode-beta.app", version: "27.0", build: "27A123", headless: true)
+        defer { removeFixture(beta) }
+
+        let launchResolver = DefaultServerLaunchResolver(
+            xcodeRuntimeResolver: makeResolver(
+                running: [RunningXcodeApplication(
+                    applicationURL: beta.applicationURL,
+                    isActive: true,
+                    processIdentifier: 4242
+                )],
+                selected: nil
+            ),
+            xcodeMCPServerStatusProvider: StaticXcodeMCPServerStatusProvider(
+                value: XcodeMCPServerStatus(enabled: true, running: true)
+            )
+        )
+        let config = ServerConfig(name: "xcode-tools", command: "xcrun", args: ["mcpbridge"])
+
+        let explicitDirectory = try await launchResolver.resolve(
+            config: config,
+            environment: ["DEVELOPER_DIR": beta.developerDirectoryURL.path]
+        )
+        let explicitProcess = try await launchResolver.resolve(
+            config: config,
+            environment: ["MCP_XCODE_PID": "9001"]
+        )
+        let nonXcode = try await launchResolver.resolve(
+            config: ServerConfig(name: "other", command: "node", args: ["server.js"]),
+            environment: [:]
+        )
+
+        #expect(explicitDirectory.automaticXcodeBinding == nil)
+        #expect(explicitProcess.automaticXcodeBinding == nil)
+        #expect(nonXcode.automaticXcodeBinding == nil)
+    }
+
+    @Test("Unverified headless status does not count as a binding change")
+    func unverifiedHeadlessStatusMatchesHeadlessBinding() async throws {
+        let beta = try makeFixture(name: "Xcode-beta.app", version: "27.0", build: "27A123", headless: true)
+        defer { removeFixture(beta) }
+
+        let running = [RunningXcodeApplication(applicationURL: beta.applicationURL, isActive: true)]
+        let config = ServerConfig(name: "xcode-tools", command: "xcrun", args: ["mcpbridge"])
+        let verified = try await DefaultServerLaunchResolver(
+            xcodeRuntimeResolver: makeResolver(running: running, selected: nil),
+            xcodeMCPServerStatusProvider: StaticXcodeMCPServerStatusProvider(
+                value: XcodeMCPServerStatus(enabled: true, running: true)
+            )
+        ).resolve(config: config, environment: [:])
+        let unverified = try await DefaultServerLaunchResolver(
+            xcodeRuntimeResolver: makeResolver(running: running, selected: nil),
+            xcodeMCPServerStatusProvider: FailingXcodeMCPServerStatusProvider()
+        ).resolve(config: config, environment: [:])
+
+        #expect(unverified.metadata["xcodeConnection"] == "headless-mcp-server-unverified")
+        #expect(verified.automaticXcodeBinding == unverified.automaticXcodeBinding)
+    }
+
     private func makeResolver(
         running: [RunningXcodeApplication],
         selected: URL?

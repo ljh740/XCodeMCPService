@@ -24,6 +24,7 @@ final class StatusBarController: NSObject {
     private var statusMenuItem: NSMenuItem?
     private var startStopMenuItem: NSMenuItem?
     private var configSubmenu: NSMenu?
+    private var restartServerMenuItem: NSMenuItem?
 
     // MARK: - Init
 
@@ -105,6 +106,12 @@ final class StatusBarController: NSObject {
         )
         restart.target = self
         menu.addItem(restart)
+
+        // 重启单个服务器
+        let restartServerItem = NSMenuItem(title: L10n("menu.restartServer"), action: nil, keyEquivalent: "")
+        restartServerItem.submenu = NSMenu()
+        self.restartServerMenuItem = restartServerItem
+        menu.addItem(restartServerItem)
 
         menu.addItem(.separator())
 
@@ -216,6 +223,8 @@ final class StatusBarController: NSObject {
             startStopMenuItem?.isEnabled = true
         }
 
+        restartServerMenuItem?.isEnabled = state.canStop
+
         // 刷新配置信息子菜单
         refreshConfigSubmenu()
     }
@@ -224,6 +233,8 @@ final class StatusBarController: NSObject {
     private func refreshConfigSubmenu() {
         guard let configSubmenu else { return }
         configSubmenu.removeAllItems()
+        let restartServerSubmenu = restartServerMenuItem?.submenu
+        restartServerSubmenu?.removeAllItems()
 
         // 异步加载配置信息
         Task {
@@ -251,6 +262,11 @@ final class StatusBarController: NSObject {
                     let item = NSMenuItem(title: "  • \(name)", action: nil, keyEquivalent: "")
                     item.isEnabled = false
                     configSubmenu.addItem(item)
+
+                    let restartItem = NSMenuItem(title: name, action: #selector(restartServer(_:)), keyEquivalent: "")
+                    restartItem.target = self
+                    restartItem.representedObject = name
+                    restartServerSubmenu?.addItem(restartItem)
                 }
             }
         }
@@ -272,6 +288,13 @@ final class StatusBarController: NSObject {
     @objc private func restartService() {
         Task {
             await bridgeManager.restart()
+        }
+    }
+
+    @objc private func restartServer(_ sender: NSMenuItem) {
+        guard let name = sender.representedObject as? String else { return }
+        Task {
+            await bridgeManager.restartServer(name: name)
         }
     }
 

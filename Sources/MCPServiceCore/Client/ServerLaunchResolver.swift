@@ -20,6 +20,35 @@ public struct ResolvedServerLaunch: Sendable, Equatable {
     }
 }
 
+/// 决定子进程实际连接哪个 Xcode 的关键字段，用于判断 Xcode 切换后是否需要重启。
+public struct XcodeLaunchBinding: Sendable, Equatable {
+    public let xcodePath: String
+    public let connection: String
+    public let processIdentifier: String?
+}
+
+extension ResolvedServerLaunch {
+    /// 自动解析出的 Xcode 绑定；非 Xcode server 或显式 DEVELOPER_DIR / MCP_XCODE_PID 返回 nil，不参与自动切换。
+    public var automaticXcodeBinding: XcodeLaunchBinding? {
+        guard let xcodePath = metadata["xcodePath"],
+              let connection = metadata["xcodeConnection"],
+              metadata["xcodeSelection"] != XcodeSelectionSource.explicitEnvironment.rawValue,
+              connection != "running-xcode-explicit"
+        else {
+            return nil
+        }
+        // status 探测失败只影响诊断，连接方式仍是 headless，避免探测抖动触发重启。
+        let normalizedConnection = connection == "headless-mcp-server-unverified"
+            ? "headless-mcp-server"
+            : connection
+        return XcodeLaunchBinding(
+            xcodePath: xcodePath,
+            connection: normalizedConnection,
+            processIdentifier: metadata["xcodePID"]
+        )
+    }
+}
+
 public protocol ServerLaunchResolving: Sendable {
     func resolve(config: ServerConfig, environment: [String: String]) async throws -> ResolvedServerLaunch
 }

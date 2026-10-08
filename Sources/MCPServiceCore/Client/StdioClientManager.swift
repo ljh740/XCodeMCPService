@@ -28,6 +28,7 @@ public actor StdioClientManager: StdioClientManaging {
         public let stdinPipe: Pipe
         public let stdoutPipe: Pipe
         public let config: ServerConfig
+        public let launch: ResolvedServerLaunch
     }
 
     // MARK: - Properties
@@ -71,19 +72,8 @@ public actor StdioClientManager: StdioClientManaging {
             await stopServer(name: name)
         }
 
-        // 合并当前进程环境变量与配置的环境变量
-        var environment = ProcessInfo.processInfo.environment
-        if let env = config.env {
-            for (key, value) in env {
-                environment[key] = value
-            }
-        }
-
         // 每次启动（包括重连）都重新解析运行环境，确保 mcpbridge 与当前 Xcode 匹配。
-        let resolvedLaunch = try await launchResolver.resolve(
-            config: config,
-            environment: environment
-        )
+        let resolvedLaunch = try await resolve(config: config)
 
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
@@ -171,12 +161,32 @@ public actor StdioClientManager: StdioClientManaging {
             process: process,
             stdinPipe: stdinPipe,
             stdoutPipe: stdoutPipe,
-            config: config
+            config: config,
+            launch: resolvedLaunch
         )
 
         logger.info("Server '\(name)' connected successfully", metadata: [
             "elapsed": "\(connectDuration)",
         ])
+    }
+
+    /// 按当前环境重新解析启动参数但不启动进程，用于判断运行中的子进程是否仍绑定正确的 Xcode。
+    public func resolveLaunch(name: String) async throws -> ResolvedServerLaunch {
+        guard let config = serverConfigs[name] else {
+            throw BridgeError.serverNotFound("Server config not found: \(name)")
+        }
+        return try await resolve(config: config)
+    }
+
+    private func resolve(config: ServerConfig) async throws -> ResolvedServerLaunch {
+        // 合并当前进程环境变量与配置的环境变量
+        var environment = ProcessInfo.processInfo.environment
+        if let env = config.env {
+            for (key, value) in env {
+                environment[key] = value
+            }
+        }
+        return try await launchResolver.resolve(config: config, environment: environment)
     }
 
     /// Force-kill timeout: maximum time (in milliseconds) to wait after SIGTERM before escalating to SIGKILL.
@@ -328,6 +338,11 @@ public actor StdioClientManager: StdioClientManaging {
 
     func processIdentifier(name: String) -> Int32? {
         servers[name]?.process.processIdentifier
+    }
+
+    /// 获取运行中服务器启动时解析出的参数
+    public func currentLaunch(name: String) -> ResolvedServerLaunch? {
+        servers[name]?.launch
     }
 
     /// 获取所有运行中的服务器名称

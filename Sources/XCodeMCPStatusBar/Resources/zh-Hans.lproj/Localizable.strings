@@ -12,6 +12,7 @@
 "menu.start" = "启动服务";
 "menu.stop" = "停止服务";
 "menu.restart" = "重启服务";
+"menu.restartServer" = "重启单个服务器";
 "menu.configuration" = "配置信息";
 "menu.openConfig" = "打开配置文件...";
 "menu.openLogs" = "打开日志目录...";

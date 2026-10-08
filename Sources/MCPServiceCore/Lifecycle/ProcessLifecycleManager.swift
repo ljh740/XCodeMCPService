@@ -129,6 +129,19 @@ public enum LifecycleEvent: Sendable {
     case serverHangDetected(name: String)
 }
 
+// MARK: - ServerRestartOutcome
+
+/// 按需重启的结果
+public enum ServerRestartOutcome: Sendable, Equatable {
+    case restarted
+    /// 正在崩溃恢复或挂起重连，稍后再试
+    case busy
+    /// 未被监控（已永久下线或服务已停止）
+    case notMonitored
+    /// 启动失败，已转入崩溃恢复
+    case failed
+}
+
 // MARK: - ProcessLifecycleManager
 
 /// 监控子进程健康状态，实现崩溃检测和自动重启（指数退避）
@@ -389,6 +402,54 @@ public actor ProcessLifecycleManager: RuntimeHealthReporting {
                 continue
             }
         }
+    }
+
+    // MARK: - On-demand Restart
+
+    /// 按需重启单个服务器（Xcode 切换或用户手动触发），不消耗崩溃重启计数。
+    /// 失败时转入 handleCrash 的退避重试，保证服务器不会停留在已停止状态。
+    public func restartServer(serverName: String) async -> ServerRestartOutcome {
+        guard !disposed, monitoredServers.contains(serverName) else { return .notMonitored }
+        guard processStates[serverName]?.isRestarting != true else { return .busy }
+
+        processStates[serverName]?.isRestarting = true
+        logger.info("On-demand restart requested", metadata: ["server": serverName])
+        callbacks.onRestarting?(serverName, 1)
+
+        await clientManager.stopServer(name: serverName)
+        guard !disposed, monitoredServers.contains(serverName) else { return .notMonitored }
+
+        do {
+            try await clientManager.startServer(name: serverName)
+        } catch {
+            processStates[serverName]?.isRestarting = false
+            guard !disposed, monitoredServers.contains(serverName) else { return .notMonitored }
+            logger.error("On-demand restart failed, falling back to crash recovery", metadata: [
+                "server": serverName,
+                "error": "\(error)",
+            ])
+            callbacks.onRestartFailed?(serverName, error)
+            await handleCrash(serverName: serverName)
+            return .failed
+        }
+
+        processStates[serverName]?.isRestarting = false
+        guard !disposed, monitoredServers.contains(serverName) else {
+            // 清理刚启动的服务器，避免孤儿进程
+            await clientManager.stopServer(name: serverName)
+            return .notMonitored
+        }
+
+        let generation = advanceRequestGeneration(serverName: serverName)
+        processStates[serverName]?.consecutiveHealthFailures = 0
+        processStates[serverName]?.hangCycleCount = 0
+        logger.info("On-demand restart succeeded", metadata: [
+            "server": serverName,
+            "generation": "\(generation)",
+        ])
+        callbacks.onRestarted?(serverName)
+        startHealthCheck(serverName: serverName)
+        return .restarted
     }
 
     // MARK: - Query

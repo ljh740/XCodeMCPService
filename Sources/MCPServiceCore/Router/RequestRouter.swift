@@ -42,6 +42,8 @@ public actor RequestRouter {
     private var deviceUseGate: any DeviceUseGate = DerivedDataBuildGate()
     /// 查询运行目标的超时，避免拖慢真正的工具调用
     private let destinationLookupTimeoutMs = 3000
+    /// 各服务器进行中的 tool 调用数，Xcode 切换时据此等待长任务结束
+    private var inFlightToolCalls: [String: Int] = [:]
 
     // MARK: - Init
 
@@ -106,6 +108,14 @@ public actor RequestRouter {
             )
         }
 
+        inFlightToolCalls[resolved.serverName, default: 0] += 1
+        defer {
+            inFlightToolCalls[resolved.serverName, default: 1] -= 1
+            if inFlightToolCalls[resolved.serverName] == 0 {
+                inFlightToolCalls.removeValue(forKey: resolved.serverName)
+            }
+        }
+
         let lockWatch = await startDeviceLockWatch(
             originalToolName: resolved.originalName,
             args: args,
@@ -124,6 +134,11 @@ public actor RequestRouter {
             }
         }
         return result
+    }
+
+    /// 指定服务器是否有进行中的 tool 调用
+    public func hasInFlightToolCalls(serverName: String) -> Bool {
+        inFlightToolCalls[serverName, default: 0] > 0
     }
 
     /// 带超时转发 tool 调用到下游 client

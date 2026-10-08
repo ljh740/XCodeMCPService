@@ -43,6 +43,8 @@ public actor BridgeServer {
     private var httpServer: HTTPServer?
     private var lifecycleManager: ProcessLifecycleManager?
     private var deviceLockMonitor: DeviceLockMonitor?
+    private var xcodeSwitchCoordinator: XcodeRuntimeSwitchCoordinator?
+    private var xcodeObserverTask: Task<Void, Never>?
 
     private var running = false
     private let logger: BridgeLogger
@@ -285,7 +287,18 @@ public actor BridgeServer {
         await lifecycleManager.monitorAll()
         self.lifecycleManager = lifecycleManager
 
-        // 11. 标记运行中
+        // 11. Xcode 启动/退出后重新核对各服务器绑定的 Xcode
+        let xcodeSwitchCoordinator = XcodeRuntimeSwitchCoordinator(
+            inspector: clientManager,
+            restarter: lifecycleManager,
+            activity: router
+        )
+        self.xcodeSwitchCoordinator = xcodeSwitchCoordinator
+        xcodeObserverTask = XcodeApplicationObserver.observe {
+            await xcodeSwitchCoordinator.xcodeApplicationsChanged()
+        }
+
+        // 12. 标记运行中
         running = true
         logger.info("BridgeServer started successfully")
     }
@@ -293,6 +306,14 @@ public actor BridgeServer {
     /// 停止桥接服务器，按逆序清理所有资源
     public func stop() async {
         logger.info("BridgeServer stopping...")
+
+        // 0. 先停止 Xcode 切换监听，避免关闭过程中触发重启
+        xcodeObserverTask?.cancel()
+        xcodeObserverTask = nil
+        if let xcodeSwitchCoordinator {
+            await xcodeSwitchCoordinator.shutdown()
+        }
+        self.xcodeSwitchCoordinator = nil
 
         // 1. 生命周期管理器
         if let lifecycleManager {
@@ -326,6 +347,12 @@ public actor BridgeServer {
         // 5. 标记停止
         running = false
         logger.info("BridgeServer stopped")
+    }
+
+    /// 手动重启单个服务器
+    public func restartServer(name: String) async -> ServerRestartOutcome {
+        guard let lifecycleManager else { return .notMonitored }
+        return await lifecycleManager.restartServer(serverName: name)
     }
 
     // MARK: - Handler Registration

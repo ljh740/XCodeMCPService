@@ -12,6 +12,7 @@
 "menu.start" = "Start Service";
 "menu.stop" = "Stop Service";
 "menu.restart" = "Restart Service";
+"menu.restartServer" = "Restart Server";
 "menu.configuration" = "Configuration";
 "menu.openConfig" = "Open Config File...";
 "menu.openLogs" = "Open Logs Folder...";
