@@ -62,6 +62,7 @@ private actor FakeLLDBMCPClient: LLDBMCPClient {
     private let adapterPID: Int32?
     private let failsListingTools: Bool
     private let failsCreatingSession: Bool
+    private let commandResult: LLDBToolResponse?
     private let onCreate: (@Sendable () async -> Void)?
     private let onStop: (@Sendable () async -> Void)?
     private var heldOperation: String?
@@ -73,6 +74,7 @@ private actor FakeLLDBMCPClient: LLDBMCPClient {
         adapterPID: Int32? = 699,
         failsListingTools: Bool = false,
         failsCreatingSession: Bool = false,
+        commandResult: LLDBToolResponse? = nil,
         onCreate: (@Sendable () async -> Void)? = nil,
         onStop: (@Sendable () async -> Void)? = nil
     ) {
@@ -81,6 +83,7 @@ private actor FakeLLDBMCPClient: LLDBMCPClient {
         self.adapterPID = adapterPID
         self.failsListingTools = failsListingTools
         self.failsCreatingSession = failsCreatingSession
+        self.commandResult = commandResult
         self.onCreate = onCreate
         self.onStop = onStop
     }
@@ -133,7 +136,7 @@ private actor FakeLLDBMCPClient: LLDBMCPClient {
             }
             return LLDBToolResponse(content: [textContent("closed")], isError: false)
         default:
-            return LLDBToolResponse(content: [textContent("ok")], isError: false)
+            return commandResult ?? LLDBToolResponse(content: [textContent("ok")], isError: false)
         }
     }
 
@@ -402,6 +405,40 @@ struct LLDBSessionControllerTests {
         #expect(message.contains("early lldb-mcp tool set [command, debugger_list]"))
         #expect(message.contains("lldb__sessions_list"))
         #expect(message.contains("lldb__command"))
+    }
+
+    @Test("LLDB result metadata survives forwarding and appended warnings", arguments: [false, true])
+    func preservesResultMetadata(withWarning: Bool) async throws {
+        let fixture = try makeRuntime(version: "27.2", includesLLDBMCP: true)
+        defer { try? FileManager.default.removeItem(at: fixture.rootURL) }
+        let response = LLDBToolResponse(
+            content: [.text(text: "value = 42", annotations: nil, _meta: nil)],
+            structuredContent: .object(["value": .int(42)]),
+            isError: false,
+            _meta: Metadata(additionalFields: ["fixture/version": "27.2"])
+        )
+        let client = FakeLLDBMCPClient(commandResult: response)
+        let registry = MutableLLDBRegistryManager(snapshot: snapshot(processIdentifier: 100))
+        let controller = makeController(runtime: fixture.runtime, registry: registry, client: client)
+        if withWarning {
+            _ = await controller.routeToolCall(toolName: "lldb__session_create", args: nil)
+            await registry.setSnapshot(snapshot(processIdentifier: 200))
+        }
+
+        let result = await controller.routeToolCall(
+            toolName: "lldb__command", args: ["command": "frame variable"]
+        )
+        await controller.shutdown()
+        let data = try #require(result?.data)
+
+        #expect(data.structuredContent == response.structuredContent)
+        #expect(data._meta == response._meta)
+        #expect(data.isError == response.isError)
+        #expect(data.content.first == response.content.first)
+        #expect(data.content.count == (withWarning ? 2 : 1))
+        if withWarning {
+            #expect(text(from: data).contains("Warning:"))
+        }
     }
 
     @Test("Refresh protects owned sessions unless force is explicit")

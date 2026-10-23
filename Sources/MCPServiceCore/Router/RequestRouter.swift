@@ -3,11 +3,8 @@ import MCP
 
 // MARK: - Result Types
 
-/// Tool 调用结果
-public struct ToolCallResult: Sendable {
-    public let content: [Tool.Content]
-    public let isError: Bool?
-}
+/// 保留 MCP 调用结果的完整结构，旧版缺失的可选字段保持缺省。
+public typealias ToolCallResult = CallTool.Result
 
 /// Resource 读取结果
 public struct ResourceReadResult: Sendable {
@@ -164,7 +161,7 @@ public actor RequestRouter {
                 try await Self.callToolCancellable(client: client, name: resolved.originalName, args: args, logger: logger)
             }
             logger.debug("Tool call succeeded", metadata: metadata)
-            return .success(ToolCallResult(content: result.content, isError: result.isError))
+            return .success(result)
         } catch is TimeoutError {
             var timeoutMetadata = metadata
             timeoutMetadata["timeoutMs"] = "\(toolTimeout)"

@@ -6,14 +6,16 @@ import MCP
 /// 聚合后的 Tool。
 /// `name` 用于对外暴露，`canonicalName` 用于桥接层内部稳定路由。
 public struct AggregatedTool: Sendable {
+    /// 保留完整的工具描述，聚合时只改写对外名称。
+    public let tool: Tool
     /// 对外暴露的名称。单下游时保留原名，多下游时使用 `serverName__originalName`。
-    public let name: String
+    public var name: String { tool.name }
     /// 内部稳定路由键，始终使用 `serverName__originalName`。
     public let canonicalName: String
     public let originalName: String
     public let serverName: String
-    public let description: String?
-    public let inputSchema: Value
+    public var description: String? { tool.description }
+    public var inputSchema: Value { tool.inputSchema }
 }
 
 /// 聚合后的 Resource，带有服务器名称前缀
@@ -474,12 +476,19 @@ public actor CapabilityAggregator {
             canonicalName: canonicalName
         )
         return AggregatedTool(
-            name: publicName,
+            tool: Tool(
+                name: publicName,
+                title: tool.title,
+                description: tool.description,
+                inputSchema: tool.inputSchema,
+                annotations: tool.annotations,
+                outputSchema: tool.outputSchema,
+                icons: tool.icons,
+                _meta: tool._meta
+            ),
             canonicalName: canonicalName,
             originalName: tool.name,
-            serverName: serverName,
-            description: tool.description,
-            inputSchema: tool.inputSchema
+            serverName: serverName
         )
     }
 

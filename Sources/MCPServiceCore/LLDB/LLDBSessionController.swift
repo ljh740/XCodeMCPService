@@ -602,10 +602,12 @@ actor LLDBSessionController {
             if let warning {
                 result = LLDBToolResponse(
                     content: result.content + [LLDBToolCatalog.textContent("Warning: \(warning)")],
-                    isError: result.isError
+                    structuredContent: result.structuredContent,
+                    isError: result.isError,
+                    _meta: result._meta
                 )
             }
-            return ToolCallResult(content: result.content, isError: result.isError)
+            return result
         } catch {
             await recordOwnedBackends(since: snapshotBeforeCall, adapterPID: adapterPID)
             return errorToolResult(

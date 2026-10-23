@@ -358,7 +358,7 @@ public actor BridgeServer {
     // MARK: - Handler Registration
 
     /// 在 MCP Server 上注册所有 handler
-    private static func registerHandlers(
+    static func registerHandlers(
         on server: Server,
         aggregator: CapabilityAggregator,
         router: RequestRouter,
@@ -371,13 +371,7 @@ public actor BridgeServer {
             let tools = await aggregator.getAggregatedTools()
                 .filter { !reservedToolNames.contains($0.name) }
             return ListTools.Result(
-                tools: tools.map { tool in
-                    Tool(
-                        name: tool.name,
-                        description: tool.description,
-                        inputSchema: tool.inputSchema
-                    )
-                } + lldbTools
+                tools: tools.map(\.tool) + lldbTools
             )
         }
 
@@ -390,7 +384,7 @@ public actor BridgeServer {
                 guard lldbResult.success, let data = lldbResult.data else {
                     throw MCPError.internalError(lldbResult.error?.message ?? "LLDB tool call failed")
                 }
-                return CallTool.Result(content: data.content, isError: data.isError)
+                return data
             }
 
             let result = await router.routeToolCall(
@@ -400,7 +394,7 @@ public actor BridgeServer {
             guard result.success, let data = result.data else {
                 throw MCPError.internalError(result.error?.message ?? "Tool call failed")
             }
-            return CallTool.Result(content: data.content, isError: data.isError)
+            return data
         }
 
         // ListResources

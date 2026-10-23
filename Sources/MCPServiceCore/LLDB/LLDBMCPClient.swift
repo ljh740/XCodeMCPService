@@ -1,10 +1,7 @@
 import Foundation
 import MCP
 
-struct LLDBToolResponse: Sendable {
-    var content: [Tool.Content]
-    var isError: Bool?
-}
+typealias LLDBToolResponse = CallTool.Result
 
 protocol LLDBMCPClient: Actor, Sendable {
     func start() async throws
@@ -57,8 +54,8 @@ actor StdioLLDBMCPClient: LLDBMCPClient {
 
     func callTool(name: String, arguments: [String: Value]?) async throws -> LLDBToolResponse {
         let client = try await runningClient()
-        let result = try await client.callTool(name: name, arguments: arguments)
-        return LLDBToolResponse(content: result.content, isError: result.isError)
+        let context: RequestContext<CallTool.Result> = try await client.callTool(name: name, arguments: arguments)
+        return try await context.value
     }
 
     func listResources() async throws -> [Resource] {

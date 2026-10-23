@@ -15,11 +15,19 @@ concurrency:
 
 jobs:
   build-and-test:
-    runs-on: macos-15
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-15, xcode-27]
+    runs-on: ${{ matrix.runner }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+
+      - name: Select Xcode 27.2
+        if: matrix.runner == 'xcode-27'
+        run: echo "DEVELOPER_DIR=/Applications/Xcode_27.2.app/Contents/Developer" >> "$GITHUB_ENV"
 
       - name: Show toolchain
         run: |

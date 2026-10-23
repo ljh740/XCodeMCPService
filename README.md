@@ -45,6 +45,7 @@ xcrun mcp-server status
 ## Features
 
 - **Multi-server aggregation** — Manage multiple MCP subprocesses and auto-aggregate downstream capabilities; tool names stay original in single-server mode and switch to namespace prefixes (`serverName__toolName`) only when multiple servers are configured
+- **MCP compatibility** — Preserve downstream tool titles, annotations, input/output schemas, icons, metadata, and structured results; optional fields absent in older Xcode versions remain absent
 - **Streamable HTTP Transport** — Lightweight HTTP server based on `NWListener`, providing `/mcp` endpoint, localhost only
 - **Session management** — Independent session per client with secure token identification
 - **Process lifecycle** — Crash detection + exponential backoff auto-restart
